@@ -91,6 +91,36 @@ impl TreePosition {
     }
 }
 
+/// Where the summon action splits the pane you invoke it from (`open_direction` config key):
+/// `Right` puts the viewer beside your work (the default, today's layout), `Down` puts it
+/// underneath so the terminal keeps the top half.
+///
+/// Unlike [`TreePosition`], this governs the HOST split, not the layout inside the viewer's own
+/// pane — so it is consumed by the launcher scripts (`--open-direction`), not by the presenter.
+/// The config value is a lenient `Option<String>` resolved into this by [`resolve`], so this enum
+/// is never deserialized directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenDirection {
+    /// Split to the right of the invoking pane (the default, today's layout).
+    #[default]
+    Right,
+    /// Split below the invoking pane — terminal on top, viewer underneath.
+    Down,
+}
+
+impl OpenDirection {
+    /// The lowercase label shown in the read-only Settings overlay — and, not by coincidence, the
+    /// exact token herdr's `--direction` flag accepts, so the launcher passes it through verbatim.
+    /// Keep the two meanings together: a label that drifts from herdr's vocabulary silently
+    /// degrades the launcher back to its `right` fallback.
+    pub fn label(self) -> &'static str {
+        match self {
+            OpenDirection::Right => "right",
+            OpenDirection::Down => "down",
+        }
+    }
+}
+
 /// A `[keys]` entry's value: the key(s) an intent binds to, written **either** as a single string
 /// (`refresh = "g"`) **or** as a TOML array of strings (`nav_up = ["w", "Up"]`). `#[serde(untagged)]`
 /// tries the variants in order, so `One(String)` must come first: a bare string deserializes to
@@ -133,6 +163,11 @@ pub struct Config {
     /// [`resolve`]; an absent or unrecognized value preserves the default diff preference. Manual
     /// `v` cycling remains available in either mode.
     pub changed_file_view: Option<String>,
+    /// The initial Git **diff baseline**: `"base"` always compares against the base branch's
+    /// merge-base, `"head"` compares only against `HEAD`, and absent or unrecognized values keep
+    /// the existing context-smart choice. The interactive `b` key still toggles the baseline after
+    /// startup.
+    pub baseline: Option<String>,
     pub update_check: Option<bool>,
     /// Whether quitting with unexported session annotations confirms first. `None` falls back to
     /// `true`: annotations are session-only, so quitting destroys them, and the confirm is the only
@@ -156,6 +191,12 @@ pub struct Config {
     /// (`"left"` / `"right"`, case-insensitive, trimmed) resolved into a [`TreePosition`] by
     /// [`resolve`]; `None` or an unrecognized value falls back to [`TreePosition::Left`].
     pub tree_position: Option<String>,
+    /// The **open direction**: which way the summon action splits the pane it is invoked from —
+    /// `"right"` (beside your work, the default) or `"down"` (underneath it). A lenient string
+    /// resolved into an [`OpenDirection`] by [`resolve`]; `None` or an unrecognized value falls
+    /// back to [`OpenDirection::Right`]. Read by the launcher scripts via `--open-direction`, not
+    /// by the running TUI — changing it affects the NEXT summon, not the current session.
+    pub open_direction: Option<String>,
     /// The **tree column cap**: the maximum tree width in character columns (see
     /// [`DEFAULT_TREE_MAX_COLS`]). `None` falls back to that default; the resolver clamps any present
     /// value into `MIN_TREE_MAX_COLS..=MAX_TREE_MAX_COLS`. Held as `u32` (like `tree_width`) so an
@@ -301,6 +342,9 @@ pub struct EffectiveSettings {
     /// normal file-type view; absent, invalid, or `"diff"` preserves the original diff-first
     /// behavior. Config-or-default (no env var).
     pub changed_file_view: crate::view_policy::ChangedFileView,
+    /// An explicit startup **diff baseline** from `baseline`, or `None` when startup must retain
+    /// [`crate::git::default_baseline`]'s context-smart selection. Config-or-default (no env var).
+    pub baseline: Option<crate::git::Baseline>,
     pub update_check: bool,
     /// The effective **confirm-before-discarding-annotations** switch: the config
     /// `confirm_discard` when present, else `true`. Config-or-default (no env var).
@@ -316,6 +360,10 @@ pub struct EffectiveSettings {
     /// The effective **tree position**: the config `tree_position` mapped to `Left`/`Right`, else
     /// [`TreePosition::Left`]. Config-or-default (no env var).
     pub tree_position: TreePosition,
+    /// The effective **open direction**: the config `open_direction` mapped to `Right`/`Down`, else
+    /// [`OpenDirection::Right`]. Consumed by the launcher scripts (through the binary's
+    /// `--open-direction` probe), never by the presenter. Config-or-default (no env var).
+    pub open_direction: OpenDirection,
     /// The effective **tree column cap**: the config `tree_max_cols` clamped to
     /// `MIN_TREE_MAX_COLS..=MAX_TREE_MAX_COLS` when present, else [`DEFAULT_TREE_MAX_COLS`]. The tree
     /// is drawn at `min(tree_width% of the pane, tree_max_cols)`. Config-or-default (no env var).
@@ -397,6 +445,20 @@ pub fn resolve(config: &Config, get_env: impl Fn(&str) -> Option<String>) -> Eff
         _ => crate::view_policy::ChangedFileView::Diff,
     };
 
+    // Config > existing context-smart default; no env var. `None` deliberately carries the
+    // fallback decision to app wiring, where the resolved root is available. An unrecognized value
+    // must not force either side of the toggle, so a typo preserves today's startup behavior.
+    let baseline = match config
+        .baseline
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("base") => Some(crate::git::Baseline::Base),
+        Some("head") => Some(crate::git::Baseline::Head),
+        _ => None,
+    };
+
     // Config > default; no env var. Defaults ON: the confirm only fires when annotations are held,
     // so a session that never annotates never sees it, and the one that does has work to lose.
     let confirm_discard = config.confirm_discard.unwrap_or(true);
@@ -437,6 +499,21 @@ pub fn resolve(config: &Config, get_env: impl Fn(&str) -> Option<String>) -> Eff
         _ => TreePosition::Left,
     };
 
+    // Config > default; no env var. Same lenient match as `tree_position`, with one extra accepted
+    // spelling: herdr's own flag vocabulary is `down`, but `bottom` is the word people reach for
+    // when describing the layout, and silently keeping `right` for it would look like the setting
+    // does nothing. Anything else keeps the default `Right`, so a typo loses the customization
+    // without crashing.
+    let open_direction = match config
+        .open_direction
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("down" | "bottom") => OpenDirection::Down,
+        _ => OpenDirection::Right,
+    };
+
     // Config > default; no env var. Clamp to `MIN_TREE_MAX_COLS..=MAX_TREE_MAX_COLS` so the cap can
     // never shrink the tree to an unreadable sliver, and a huge value just becomes the effective
     // "no cap" (it never bites on a real terminal). A non-representable value degraded the whole
@@ -473,11 +550,13 @@ pub fn resolve(config: &Config, get_env: impl Fn(&str) -> Option<String>) -> Eff
         show_ignored,
         compact_dirs,
         changed_file_view,
+        baseline,
         update_check,
         confirm_discard,
         scroll_lines,
         tree_width,
         tree_position,
+        open_direction,
         tree_max_cols,
         preview_max_lines,
         preview_max_kib,
@@ -762,6 +841,47 @@ mod tests {
                 resolve(&config, |_| None).changed_file_view,
                 crate::view_policy::ChangedFileView::Content,
                 "{value:?} is trimmed and case-folded to the content preference"
+            );
+        }
+    }
+
+    #[test]
+    fn baseline_parses_and_resolves_explicit_values_or_auto() {
+        let (config, outcome) = parse_config("baseline = \" head \"\n");
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(config.baseline.as_deref(), Some(" head "));
+        assert_eq!(
+            resolve(&config, |_| None).baseline,
+            Some(crate::git::Baseline::Head)
+        );
+
+        for (value, expected) in [
+            ("base", crate::git::Baseline::Base),
+            (" BASE ", crate::git::Baseline::Base),
+            ("BaSe", crate::git::Baseline::Base),
+            ("HEAD", crate::git::Baseline::Head),
+            ("HeAd", crate::git::Baseline::Head),
+        ] {
+            let config = Config {
+                baseline: Some(value.to_owned()),
+                ..Config::default()
+            };
+            assert_eq!(
+                resolve(&config, |_| None).baseline,
+                Some(expected),
+                "{value:?} selects the {expected:?} baseline"
+            );
+        }
+
+        for value in [None, Some("auto"), Some("unknown"), Some("")] {
+            let config = Config {
+                baseline: value.map(str::to_owned),
+                ..Config::default()
+            };
+            assert_eq!(
+                resolve(&config, |_| None).baseline,
+                None,
+                "{value:?} preserves the context-smart startup baseline"
             );
         }
     }
@@ -1352,6 +1472,68 @@ mod tests {
                 "{value:?} must resolve to {want:?}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_open_direction_config_value_wins() {
+        // "down" -> Down, "right" -> Right (config > default).
+        for (value, want) in [
+            ("down", OpenDirection::Down),
+            ("right", OpenDirection::Right),
+        ] {
+            let cfg = Config {
+                open_direction: Some(value.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(resolve(&cfg, |_| None).open_direction, want);
+        }
+    }
+
+    #[test]
+    fn resolve_open_direction_defaults_when_absent() {
+        // Omitted -> the default side split (Right, today's layout): an installed plugin that
+        // never gains a config file must keep opening exactly where it always has.
+        assert_eq!(
+            resolve(&Config::default(), |_| None).open_direction,
+            OpenDirection::Right
+        );
+    }
+
+    #[test]
+    fn resolve_open_direction_lenient_and_accepts_bottom() {
+        // Trimmed + case-insensitive like `tree_position`, plus `bottom` as a synonym for herdr's
+        // own `down` (the word users reach for). Anything else degrades to Right without panicking.
+        for (value, want) in [
+            (" DOWN ", OpenDirection::Down),
+            ("DoWn", OpenDirection::Down),
+            ("bottom", OpenDirection::Down),
+            (" Bottom ", OpenDirection::Down),
+            ("Right", OpenDirection::Right),
+            ("sideways", OpenDirection::Right),
+            ("up", OpenDirection::Right),
+            ("", OpenDirection::Right),
+        ] {
+            let cfg = Config {
+                open_direction: Some(value.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                resolve(&cfg, |_| None).open_direction,
+                want,
+                "{value:?} must resolve to {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_direction_labels_are_herdr_direction_tokens() {
+        // The label is passed STRAIGHT to `herdr ... --direction`, whose only accepted values are
+        // `right` and `down` (verified against herdr 0.9.0: `herdr plugin pane open --help` and
+        // `herdr pane split --help` each print `[possible values: right, down]`). A label that
+        // drifted off that vocabulary would be rejected by the host and the launcher would
+        // silently fall back to `right`, so pin both spellings.
+        assert_eq!(OpenDirection::Right.label(), "right");
+        assert_eq!(OpenDirection::Down.label(), "down");
     }
 
     #[test]

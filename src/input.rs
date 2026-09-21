@@ -255,7 +255,7 @@ pub(crate) const REGISTRY: &[Binding] = &[
         intent: Intent::Collapse,
         name: "collapse",
         default_keys: &[KeyCode::Left, KeyCode::Char('h')],
-        description: "Collapse the selected directory.",
+        description: "Collapse a directory, or walk up from a file/collapsed directory.",
         category: "Navigation",
     },
     Binding {

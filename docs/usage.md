@@ -31,10 +31,14 @@ setting off unless you need it; `.git/` itself always stays hidden. The tree's *
 looking.
 
 Move the cursor with `↑`/`↓` (or `k`/`j`), expand/collapse a directory with `→`/`←` (or `l`/`h`) or
-`Enter`. The tree scrolls to keep the selection in view, and sideways for long or deeply-nested
-names — reachable by keyboard with `H` / `L` when the tree is focused. A scrollbar appears whenever
-there's more than fits. Narrow or widen the tree column with `<` / `>`, or drag the divider; the
-starting split, the tree's side, and a column cap are all [configurable](configuration.md).
+`Enter`. In the normal tree, `←` on a file or an already-collapsed directory walks to and collapses
+the nearest visible parent, so repeated presses climb the tree; it stops at a root child. This also
+skips folded segments when [`compact_dirs`](configuration.md) is on. Changed-only (`c`) and status
+(`d`) views keep their existing collapse behavior because their directory rows are always expanded.
+The tree scrolls to keep the selection in view, and sideways for long or deeply-nested names —
+reachable by keyboard with `H` / `L` when the tree is focused. A scrollbar appears whenever there's
+more than fits. Narrow or widen the tree column with `<` / `>`, or drag the divider; the starting
+split, the tree's side, and a column cap are all [configurable](configuration.md).
 
 On a **deeply nested** layout the per-segment tree spends most of a narrow column on indentation, and
 the file names — the part you came for — are what gets truncated. Set
@@ -263,7 +267,7 @@ Git status is woven straight into the tree, not a separate mode:
 
 Git is read through the system `git` CLI (read-only subcommands only). Without git on `PATH` the
 viewer still opens, but the status markers, filter, baseline, and diffs are degraded — see
-[install](install.md).
+[install](install.md). git 2.39 (Apple's Xcode git) is supported.
 
 ## Navigating within a file
 

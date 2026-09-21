@@ -182,7 +182,7 @@ impl Controller {
     /// `handle()` routes to `handle_picker_intent()` while `self.modal.picker().is_some()`, and its
     /// catch-all `_ => Effects::noop()` swallows `OpenFinder`. No extra guard is needed here.
     pub(super) fn open_finder(&mut self) -> Effects {
-        let candidates = crate::index::build(&self.root);
+        let candidates = crate::index::build_scoped(&self.root, self.is_git_repo);
         self.modal = Modal::Finder(FinderState::new(candidates));
         self.last_click = None; // opening the finder resets double-click state so a prior tree
         // click cannot pair with the first finder click as a double-click

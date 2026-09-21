@@ -890,6 +890,9 @@ pub struct Controller {
     raster_rx: mpsc::Receiver<RasterDone>,
     /// Kitty/sixel picker, injected after the alt screen is up so stdio queries work.
     image_picker: Option<ratatui_image::picker::Picker>,
+    /// Whether the run loop has already been asked to query for [`image_picker`](Self::image_picker)
+    /// — the query runs at most once per session.
+    image_picker_requested: bool,
     /// PNG bytes waiting for [`set_image_picker`] so a race with the first raster job is not dropped.
     raster_pending: Option<(PathBuf, Vec<u8>)>,
     /// In-pane raster for the currently selected PDF/image, if a job has landed.
@@ -1109,6 +1112,7 @@ impl Controller {
             raster_tx,
             raster_rx,
             image_picker: None,
+            image_picker_requested: false,
             raster_pending: None,
             raster: None,
             latest_seq: 0,
@@ -1138,6 +1142,10 @@ impl Controller {
             bindings: crate::input::default_bindings(),
             key_load_outcome: crate::input::KeyLoadOutcome::default(),
         };
+        // Bound the tree's ancestor `.gitignore` search at this repo's own boundary rather than
+        // letting it climb into an unrelated enclosing directory/repository (see
+        // `index::walk_builder`); a no-op (stays `false`) outside a repo.
+        ctrl.tree.set_is_git_repo(is_git_repo);
         ctrl.refresh_git_state();
         ctrl.dispatch_render();
         ctrl
@@ -1232,7 +1240,20 @@ impl Controller {
         (job_tx, done_rx)
     }
 
-    /// Query Kitty/sixel after the alt screen is up. Tests leave this `None` (halfblock-less).
+    /// `true` exactly once: the first time a raster is waiting on a picker that was never
+    /// queried. The run loop then queries Kitty/sixel and calls [`set_image_picker`].
+    pub fn take_image_picker_request(&mut self) -> bool {
+        if self.image_picker.is_some()
+            || self.image_picker_requested
+            || self.raster_pending.is_none()
+        {
+            return false;
+        }
+        self.image_picker_requested = true;
+        true
+    }
+
+    /// Inject the Kitty/sixel picker once queried. Tests leave this `None` (halfblock-less).
     pub fn set_image_picker(&mut self, picker: ratatui_image::picker::Picker) {
         self.image_picker = Some(picker);
         if let Some((path, png)) = self.raster_pending.take()
@@ -1344,6 +1365,7 @@ impl Controller {
         self.root = resolved.root.clone();
         self.is_git_repo = resolved.is_git_repo;
         self.tree = TreeModel::new(resolved.root.clone());
+        self.tree.set_is_git_repo(self.is_git_repo);
         self.tree.set_compact_dirs(self.compact_dirs); // a carried session preference (AC-12)
         // Recompute the cached branch for the new root's bottom-border title. Cheap and
         // synchronous: a single `git rev-parse` against the already-resolved repo root, done once
@@ -2636,7 +2658,10 @@ impl Controller {
     }
 
     /// Left (←/h): collapse the selected directory when the tree is focused, or scroll the
-    /// content pane left when it is focused.
+    /// content pane left when it is focused. In the normal tree, a file or already-collapsed
+    /// directory instead walks to its nearest visible ancestor and collapses it. Changed-only and
+    /// status trees keep their existing behavior because their directory rows are synthetic and
+    /// always expanded.
     fn collapse(&mut self) -> Effects {
         if self.focus == Focus::Content {
             return self.scroll_content_h(-(HSCROLL_STEP as i32));
@@ -2644,11 +2669,35 @@ impl Controller {
         if self.focus == Focus::Pinned {
             return self.scroll_pinned_h(-(HSCROLL_STEP as i32));
         }
-        if let Some(node) = self.tree.selected()
-            && node.kind == NodeKind::Dir
-        {
+        let Some(node) = self.tree.selected() else {
+            return Effects::noop();
+        };
+        // During an asynchronous re-root refresh, the fresh tree has not received its
+        // changed-only filter yet. The controller's carried mode state is authoritative during
+        // that interval, so c/d cannot briefly fall through to normal-tree walk-up behavior.
+        if self.changed_only || self.status_mode {
+            if node.kind == NodeKind::Dir {
+                self.tree.collapse(&node.path);
+                return Effects::redraw();
+            }
+            return Effects::noop();
+        }
+        if node.kind == NodeKind::Dir && node.expanded {
             self.tree.collapse(&node.path);
             return Effects::redraw();
+        }
+
+        let mut current = node.path.as_path();
+        while let Some(parent) = current.parent() {
+            if parent == self.root || !parent.starts_with(&self.root) {
+                return Effects::noop();
+            }
+            if self.tree.select(parent) {
+                self.tree.collapse(parent);
+                self.dispatch_render();
+                return Effects::redraw();
+            }
+            current = parent;
         }
         Effects::noop()
     }

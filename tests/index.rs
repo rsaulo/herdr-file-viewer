@@ -125,6 +125,34 @@ fn works_in_non_git_dir() {
     );
 }
 
+// (i) Regression: `build_scoped(root, true)` bounds the ancestor `.gitignore` search at root's
+// own repo boundary instead of letting it climb into an unrelated enclosing directory. See the
+// matching `tree_filters.rs` test for the Tree Model side of the same fix.
+#[test]
+fn build_scoped_bounds_ancestor_gitignore_at_the_repo_boundary() {
+    let outer = common::TempDir::new();
+    fs::write(outer.path().join(".gitignore"), "vendor/\n").unwrap();
+    let inner = outer.path().join("inner");
+    fs::create_dir_all(inner.join("vendor")).unwrap();
+    common::init_repo_with_commit(&inner);
+    fs::write(inner.join("vendor/keep.txt"), "k").unwrap();
+
+    // `build` (is_git_repo = false, today's default) is unbounded and still picks up the outer
+    // ancestor's unrelated `vendor/` rule.
+    let unbounded = index::build(&inner);
+    assert!(
+        !unbounded.iter().any(|p| p.starts_with("vendor/")),
+        "sanity check: the outer ancestor .gitignore reaches in when not told this is a repo"
+    );
+
+    // `build_scoped(&inner, true)` bounds the search at `inner`'s own `.git`.
+    let bounded = index::build_scoped(&inner, true);
+    assert!(
+        bounded.iter().any(|p| p == "vendor/keep.txt"),
+        "an unrelated ancestor .gitignore outside the repo must not hide files inside it, got: {bounded:?}"
+    );
+}
+
 // (h) AC-N1: the filesystem is unchanged after build
 #[test]
 fn filesystem_unchanged_after_build() {

@@ -5,19 +5,21 @@
 //! the viewer keeps working as a plain browser (AC-26).
 //!
 //! The viewer opens *untrusted* repositories (e.g. an agent's worktree, a clone), so
-//! every invocation is hardened against repo-controlled code execution: `--no-ext-diff` +
-//! `--no-textconv` refuse repo-configured diff/textconv programs, `core.fsmonitor` and
-//! `core.hooksPath` are neutralized, and `GIT_OPTIONAL_LOCKS=0` keeps status/diff from
-//! writing the index (AC-N2). Paths are parsed from NUL-delimited (`-z`) output as raw
+//! every invocation is hardened against repo-controlled code execution: executable filters
+//! are neutralized, `--no-ext-diff` + `--no-textconv` refuse diff/textconv programs,
+//! `core.fsmonitor` and `core.hooksPath` are neutralized, and `GIT_OPTIONAL_LOCKS=0` keeps
+//! status/diff from writing the index (AC-N2). Paths are parsed from NUL-delimited (`-z`) output as raw
 //! bytes, so any filename — spaces, control chars, non-ASCII — maps to the real
 //! filesystem path. The host's base-branch hint is threaded through every Base query so
 //! the baseline used to *decide* Base matches the one used to *compute* it.
 
 use crate::root::Resolved;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 /// git's well-known empty-tree object — the baseline for an unborn repo's first files.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -353,15 +355,124 @@ pub fn diff_directory(
     output
 }
 
-/// Build a `git -C <dir> <args>` command hardened for read-only use against an **untrusted**
-/// repository: `GIT_OPTIONAL_LOCKS=0` stops status/diff from writing the index (AC-N2);
-/// `core.fsmonitor` / `core.hooksPath` are neutralized so a planted `.git/config` can't run a
-/// program during a query; and inherited repo-redirecting env (`GIT_DIR`/`GIT_WORK_TREE`/…) is
-/// dropped so queries resolve against `-C <dir>`, not a repository the viewer was launched
-/// against. **This is the single source of that hardening** — the Root Resolver
-/// ([`crate::root`]) builds its queries through this same function, so the guards cannot drift
-/// between the two.
-pub(crate) fn git_command(repo_root: &Path, args: &[&str]) -> Command {
+/// Cached answer to [`probe_attr_source`]. One probe per process; every later query reuses it.
+static ATTR_SOURCE_SUPPORTED: OnceLock<bool> = OnceLock::new();
+
+/// Whether this `git` accepts `--attr-source` (git ≥ 2.40). Apple's Xcode git is still 2.39.x
+/// and treats the unknown flag as a hard error, so passing it unconditionally made every query
+/// fail and the viewer degraded to a plain, non-git browser (#160).
+fn attr_source_supported() -> bool {
+    *ATTR_SOURCE_SUPPORTED.get_or_init(probe_attr_source)
+}
+
+/// Probe: `git --attr-source=<empty-tree> --version`. Success means the flag is known; any
+/// failure (unknown option, git missing) means omit it. `--version` needs no repository.
+fn probe_attr_source() -> bool {
+    Command::new("git")
+        .arg(format!("--attr-source={EMPTY_TREE}"))
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Turn git's NUL-delimited config-key bytes into an OS argument without changing the driver
+/// name. Repository config is untrusted, so lossy decoding would leave a non-UTF-8 driver active.
+#[cfg(unix)]
+fn os_string_from_git_bytes(bytes: Vec<u8>) -> Option<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(OsString::from_vec(bytes))
+}
+
+#[cfg(windows)]
+fn os_string_from_git_bytes(bytes: Vec<u8>) -> Option<OsString> {
+    String::from_utf8(bytes).ok().map(OsString::from)
+}
+
+/// Extract every configured filter driver name from `git config --null --name-only` output.
+/// A driver subsection may itself contain dots, so split at the final dot, not every dot.
+fn configured_filter_driver_names(out: &[u8]) -> BTreeSet<Vec<u8>> {
+    let mut drivers = BTreeSet::new();
+    for key in out.split(|byte| *byte == 0).filter(|key| !key.is_empty()) {
+        let Some(prefix) = key.get(..7) else { continue };
+        if !prefix.eq_ignore_ascii_case(b"filter.") {
+            continue;
+        }
+        let Some(last_dot) = key.iter().rposition(|byte| *byte == b'.') else {
+            continue;
+        };
+        if last_dot < 7 {
+            continue;
+        }
+        let field = &key[last_dot + 1..];
+        if [b"clean".as_slice(), b"smudge", b"process", b"required"]
+            .iter()
+            .any(|candidate| field.eq_ignore_ascii_case(candidate))
+        {
+            drivers.insert(key[7..last_dot].to_vec());
+        }
+    }
+    drivers
+}
+
+/// Read filter driver names without consulting attributes or the index, then return command-line
+/// overrides that make every configured filter a non-required no-op. Git's documented behavior for
+/// a filter without a command is pass-through; in git 2.39's `convert.c`, empty clean/process
+/// strings are likewise rejected by the `*cmd` check before any child can spawn.
+fn configured_filter_overrides(repo_root: &Path) -> Option<Vec<OsString>> {
+    let output = base_git_command(repo_root)
+        .args([
+            "config",
+            "--includes",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\.",
+        ])
+        .output()
+        .ok()?;
+    // `git config --get-regexp` returns 1 for no matches. Every other failure is unsafe to
+    // interpret as "no filters": fail closed rather than running the requested repo query with
+    // an incomplete inventory.
+    let no_matches = output.status.code() == Some(1) && output.stdout.is_empty();
+    if !(output.status.success() || no_matches) {
+        return None;
+    }
+
+    filter_overrides_from_config(&output.stdout)
+}
+
+fn filter_overrides_from_config(output: &[u8]) -> Option<Vec<OsString>> {
+    configured_filter_driver_names(output)
+        .into_iter()
+        .flat_map(|driver| {
+            ["clean", "smudge", "process", "required"]
+                .into_iter()
+                .map(move |field| {
+                    // Git splits `-c key=value` at the first equals sign.
+                    if driver.contains(&b'=') {
+                        return None;
+                    }
+                    let mut arg = b"filter.".to_vec();
+                    arg.extend_from_slice(&driver);
+                    arg.push(b'.');
+                    arg.extend_from_slice(field.as_bytes());
+                    arg.push(b'=');
+                    if field == "required" {
+                        arg.extend_from_slice(b"false");
+                    }
+                    os_string_from_git_bytes(arg)
+                })
+        })
+        .collect()
+}
+
+/// Start a git command with the environment and repository selection shared by the safe config
+/// inventory and every viewer query. The inventory runs only the built-in `git config`, which
+/// reads configuration but does not read attributes/index content or invoke filter drivers.
+fn base_git_command(repo_root: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
         // Drop inherited repo-redirecting env so queries resolve against `-C <repo>`, not
@@ -373,14 +484,49 @@ pub(crate) fn git_command(repo_root: &Path, args: &[&str]) -> Command {
         .env_remove("GIT_OBJECT_DIRECTORY")
         .arg("-C")
         .arg(repo_root)
-        // Read attributes from the empty tree, not the worktree `.gitattributes`, so a
-        // repo-planted `filter=<driver>` (clean/smudge) or `diff=<driver>` (textconv)
-        // cannot run a configured program during a read-only query.
-        .arg(format!("--attr-source={EMPTY_TREE}"))
         .args(["-c", "core.fsmonitor=false"])
         .arg("-c")
-        .arg(format!("core.hooksPath={NULL_DEVICE}"))
-        .args(args);
+        .arg(format!("core.hooksPath={NULL_DEVICE}"));
+    cmd
+}
+
+/// Build a `git -C <dir> <args>` command hardened for read-only use against an **untrusted**
+/// repository: `GIT_OPTIONAL_LOCKS=0` stops status/diff from writing the index (AC-N2);
+/// `core.fsmonitor` / `core.hooksPath` are neutralized; every configured clean/smudge/process
+/// filter is replaced by an empty non-required command; and inherited repo-redirecting env is
+/// dropped. **This is the single source of that hardening** for the Git Service and Root Resolver.
+///
+/// `--attr-source` still pins worktree attributes to the empty tree when available. Older git
+/// omits that unsupported flag. Filter overrides also cover attribute sources the flag does not
+/// replace, including `$GIT_DIR/info/attributes`.
+pub(crate) fn git_command(repo_root: &Path, args: &[&str]) -> Command {
+    let Some(filter_overrides) = configured_filter_overrides(repo_root) else {
+        // A global option that git cannot recognize fails before repository setup or command
+        // dispatch. This keeps the existing degrade-to-neutral behavior without risking a query
+        // whose executable-filter inventory could not be established.
+        let mut refused = base_git_command(repo_root);
+        refused.arg("--herdr-refuse-unverified-filter-config");
+        return refused;
+    };
+    git_command_with(repo_root, args, attr_source_supported(), &filter_overrides)
+}
+
+/// Shared builder with explicit feature and filter inputs so unit tests do not depend on the
+/// runner's git version or repository configuration.
+fn git_command_with(
+    repo_root: &Path,
+    args: &[&str],
+    pin_attr_source: bool,
+    filter_overrides: &[OsString],
+) -> Command {
+    let mut cmd = base_git_command(repo_root);
+    if pin_attr_source {
+        cmd.arg(format!("--attr-source={EMPTY_TREE}"));
+    }
+    for filter_override in filter_overrides {
+        cmd.arg("-c").arg(filter_override);
+    }
+    cmd.args(args);
     cmd
 }
 
@@ -647,14 +793,8 @@ mod tests {
         );
     }
 
-    /// The shared hardened builder must apply *every* untrusted-repo guard. This is the
-    /// regression guard that keeps the Git Service and the Root Resolver — which now build
-    /// their queries through this one function — from silently dropping a protection (AC-N2).
-    #[test]
-    fn git_command_applies_every_untrusted_repo_guard() {
-        let cmd = git_command(Path::new("/some/repo"), &["status"]);
-
-        // CLI guards: -C <dir>, neutralized fsmonitor/hooks, attr-source pinned to empty tree.
+    /// Shared assertions for the untrusted-repo guards that never depend on git's version.
+    fn assert_version_independent_guards(cmd: &Command) {
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -671,12 +811,7 @@ mod tests {
             args.contains(&format!("core.hooksPath={NULL_DEVICE}")),
             "hooks neutralized: {args:?}"
         );
-        assert!(
-            args.iter().any(|a| a.starts_with("--attr-source=")),
-            "attr-source pinned to the empty tree: {args:?}"
-        );
 
-        // GIT_OPTIONAL_LOCKS=0 is set; the repo-redirecting vars are scrubbed (env value None).
         let envs: Vec<(String, Option<String>)> = cmd
             .get_envs()
             .map(|(k, v)| {
@@ -703,6 +838,137 @@ mod tests {
                 "{var} is scrubbed from the child env: {envs:?}"
             );
         }
+    }
+
+    fn command_args(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn configured_filter_keys_extract_exact_driver_names() {
+        let names = configured_filter_driver_names(
+            b"filter.simple.clean\0filter.with.dots.process\0filter.Case.smudge\0\
+              filter.required-only.required\0diff.not-a-filter.command\0filter.no-command.delay\0",
+        );
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                b"Case".to_vec(),
+                b"required-only".to_vec(),
+                b"simple".to_vec(),
+                b"with.dots".to_vec(),
+            ])
+        );
+    }
+
+    #[test]
+    fn empty_filter_driver_is_neutralized() {
+        let overrides = filter_overrides_from_config(b"filter..clean\0filter..process\0").unwrap();
+        assert_eq!(
+            overrides,
+            [
+                "filter..clean=",
+                "filter..smudge=",
+                "filter..process=",
+                "filter..required=false"
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn equals_in_filter_driver_refuses_entire_inventory() {
+        assert!(
+            filter_overrides_from_config(b"filter.normal.clean\0filter.probe=x.clean\0").is_none()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn invalid_utf8_filter_inventory_is_refused() {
+        assert!(filter_overrides_from_config(b"filter.\xff.clean\0").is_none());
+    }
+
+    fn sample_filter_overrides() -> Vec<OsString> {
+        [
+            "filter.hostile.clean=",
+            "filter.hostile.smudge=",
+            "filter.hostile.process=",
+            "filter.hostile.required=false",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+    }
+
+    /// The shared hardened builder must apply *every* untrusted-repo guard that does not
+    /// depend on git's version. This is the regression guard that keeps the Git Service and
+    /// the Root Resolver from silently dropping a protection (AC-N2). `--attr-source` is
+    /// version-gated (#160), while executable filters are neutralized on both paths.
+    #[test]
+    fn git_command_applies_every_untrusted_repo_guard() {
+        let overrides = sample_filter_overrides();
+        for pin_attr_source in [true, false] {
+            let cmd = git_command_with(
+                Path::new("/some/repo"),
+                &["status"],
+                pin_attr_source,
+                &overrides,
+            );
+            assert_version_independent_guards(&cmd);
+            let args = command_args(&cmd);
+            for filter_override in &overrides {
+                assert!(
+                    args.contains(&filter_override.to_string_lossy().into_owned()),
+                    "filter command/required setting neutralized: {args:?}"
+                );
+            }
+        }
+    }
+
+    /// git ≥ 2.40: `--attr-source` is pinned to the empty tree so worktree attributes are
+    /// ignored. Filter neutralization remains an independent guard for other attr sources.
+    #[test]
+    fn git_command_pins_attr_source_when_supported() {
+        let cmd = git_command_with(Path::new("/some/repo"), &["status"], true, &[]);
+        let args = command_args(&cmd);
+        assert!(
+            args.iter().any(|a| a.starts_with("--attr-source=")),
+            "attr-source pinned to the empty tree: {args:?}"
+        );
+        assert!(
+            args.contains(&format!("--attr-source={EMPTY_TREE}")),
+            "attr-source uses the empty-tree object: {args:?}"
+        );
+    }
+
+    /// git < 2.40 (Apple Git 2.39.x): omit `--attr-source` so queries still succeed. The
+    /// other hardenings stay on — this is the #160 path, not a security-off switch.
+    #[test]
+    fn git_command_omits_attr_source_when_unsupported() {
+        let cmd = git_command_with(Path::new("/some/repo"), &["status"], false, &[]);
+        let args = command_args(&cmd);
+        assert!(
+            args.iter().all(|a| !a.starts_with("--attr-source=")),
+            "attr-source must be omitted on older git: {args:?}"
+        );
+        assert_version_independent_guards(&cmd);
+    }
+
+    /// The live builder's `--attr-source` decision must match the probe, so a runner's git
+    /// version cannot silently desync the two.
+    #[test]
+    fn live_git_command_matches_attr_source_probe() {
+        let cmd = git_command(Path::new(env!("CARGO_MANIFEST_DIR")), &["status"]);
+        let args = command_args(&cmd);
+        let pinned = args.iter().any(|a| a.starts_with("--attr-source="));
+        assert_eq!(
+            pinned,
+            attr_source_supported(),
+            "live git_command attr-source pin must match the probe: {args:?}"
+        );
     }
 
     // ---- classify: every porcelain XY code → Status -----------------------------

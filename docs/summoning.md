@@ -50,6 +50,21 @@ description = "open file viewer in split"
 Reload with `herdr server reload-config`. Pressing the key then opens / focuses / hides the
 viewer via the same idempotent launcher.
 
+## Split beside or below
+
+By default the split opens to the **right** of the pane you pressed the key in. Set
+[`open_direction`](configuration.md) to put it **below** instead, so your terminal keeps the top
+half and the viewer takes the bottom:
+
+```toml
+# <plugin config dir>/config.toml   (`herdr plugin config-dir herdr-file-viewer`)
+open_direction = "down"
+```
+
+No reload is needed — the launcher reads it on each summon, so the next `prefix+f` opens
+underneath. It applies to the split action only: a tab has no direction, so
+`open-file-viewer-tab` ignores it.
+
 ## Open in a tab instead of a split
 
 A second action, `open-file-viewer-tab`, opens the viewer in its **own tab**

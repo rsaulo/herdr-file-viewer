@@ -23,6 +23,7 @@ const SECURITY: &str = include_str!("../SECURITY.md");
 const ARCHITECTURE: &str = include_str!("../ARCHITECTURE.md");
 const AGENT_SKILL: &str = include_str!("../skills/herdr-file-viewer/SKILL.md");
 const OPEN_PANE_SCRIPT: &str = include_str!("../scripts/open-file-viewer.sh");
+const OPEN_PANE_PS1: &str = include_str!("../scripts/open-file-viewer.ps1");
 const OPEN_TAB_SCRIPT: &str = include_str!("../scripts/open-file-viewer-tab.sh");
 
 /// The `--cwd` drift guard (#139).
@@ -80,6 +81,31 @@ fn no_documented_launch_passes_cwd_to_plugin_pane_open() {
     );
 }
 
+/// Static complement to the executable config-to-launcher handoff tests in
+/// `tests/open_direction.rs`: split launchers must not re-hardcode the old default, and the tab
+/// launcher must stay outside this pane-only setting. Whether each split launcher actually probes
+/// the binary is proved by executing it, not by searching raw script text where comments can satisfy
+/// a `contains` assertion.
+#[test]
+fn split_launchers_do_not_hardcode_direction_and_tab_has_none() {
+    for (name, script) in [
+        ("scripts/open-file-viewer.sh", OPEN_PANE_SCRIPT),
+        ("scripts/open-file-viewer.ps1", OPEN_PANE_PS1),
+    ] {
+        for hardcoded in ["--direction right", "'--direction', 'right'"] {
+            assert!(
+                !script.contains(hardcoded),
+                "{name} hardcodes `{hardcoded}`, which makes the open_direction config key a \
+                 silent no-op. Pass the probed value instead."
+            );
+        }
+    }
+    assert!(
+        !OPEN_TAB_SCRIPT.contains("--direction"),
+        "the tab launcher opens a tab, which has no direction — it must not grow a --direction flag"
+    );
+}
+
 /// Whether `example` has a commented-out TOML assignment for `key` (a line that, after its leading
 /// `#`, reads `key = ...`). Stronger than a bare substring: the key must appear as an actual
 /// (commented) assignment, not merely as a word in prose.
@@ -111,12 +137,14 @@ fn config_example_documents_every_config_key() {
         "show_ignored",
         "compact_dirs",
         "changed_file_view",
+        "baseline",
         "update_check",
         "confirm_discard",
         "scroll_lines",
         "tree_width",
         "tree_position",
         "tree_max_cols",
+        "open_direction",
         "preview_max_lines",
         "preview_max_kib",
     ] {

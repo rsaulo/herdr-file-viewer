@@ -49,7 +49,6 @@ const RENDER_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn run(open_flag: Option<String>) -> io::Result<()> {
     let ctx = host::from_env();
     let resolved = root::resolve(&ctx);
-    let baseline = git::default_baseline(&resolved);
 
     // Load + resolve the plugin's optional TOML config once, up front (AC-3..AC-5, AC-14, AC-16,
     // AC-17): `eff` is the fully-resolved config > env > default settings the rest of `run` wires
@@ -98,23 +97,26 @@ pub fn run(open_flag: Option<String>) -> io::Result<()> {
     });
     let clipboard: Box<dyn Clipboard> = Box::new(Osc52Clipboard);
 
-    // Wired values for the Settings display (AC-1..AC-4): built from the same startup resolution
-    // as the live components below so the overlay shows what's actually in effect.
-    let settings_wired = settings_wired(&eff, current_os_kind(), platform_editor);
-
     // Seed the changed-file view policy during construction so the first render is dispatched in
-    // its final mode (the single worker cannot cancel a job it has already started). `baseline`
-    // was already built from `resolved` above, so moving the resolved root here is its last use.
-    let mut controller = Controller::new_with_changed_file_view(
+    // its final mode (the single worker cannot cancel a job it has already started). The helper
+    // resolves the configured-or-context-smart baseline and passes that exact value to Controller.
+    let mut controller = startup_controller(
         resolved,
-        baseline,
+        &eff,
         Components {
             providers,
             editor,
             clipboard,
             renderers: Some(renderers),
         },
-        eff.changed_file_view,
+    );
+    // Wired values for the Settings display (AC-1..AC-4): built from the same controller startup
+    // result as the live components, so `?` reports the baseline actually in effect.
+    let settings_wired = settings_wired(
+        &eff,
+        controller.baseline(),
+        current_os_kind(),
+        platform_editor,
     );
     // Apply the config-driven startup hide-dotfiles default (AC-9). The interactive `.` toggle
     // still flips it later.
@@ -198,10 +200,6 @@ pub fn run(open_flag: Option<String>) -> io::Result<()> {
     ));
 
     let mut terminal = ratatui::try_init()?;
-    // After the alt screen is up, query Kitty/sixel so PDF/image previews can paint pixels.
-    if let Ok(picker) = ratatui_image::picker::Picker::from_query_stdio() {
-        controller.set_image_picker(picker);
-    }
     // Mouse is additive to the keyboard-first design (AC-18): herdr forwards mouse events to a
     // pane that requests capture, while reserving Shift+mouse for the terminal's own
     // selection/copy. Best-effort so a terminal without mouse support still runs.
@@ -400,6 +398,16 @@ fn event_loop(terminal: &mut DefaultTerminal, controller: &mut Controller) -> io
         // A render finished by the worker becomes visible on the next draw (AC-23).
         if let Some(fx) = controller.poll() {
             dirty |= fx.redraw;
+        }
+        // Query Kitty/sixel lazily, the first time a PDF/image raster is waiting to be drawn. The
+        // query's stdin reader cannot be cancelled, so a terminal that never answers would leak a
+        // thread that swallows the next key press; deferring it keeps plain browsing (and the
+        // `q` close key, AC-20) out of that path entirely.
+        if controller.take_image_picker_request() {
+            if let Ok(picker) = ratatui_image::picker::Picker::from_query_stdio() {
+                controller.set_image_picker(picker);
+            }
+            dirty = true;
         }
         // Advance the self-expiring status flash; it redraws once per phase change (dim / gone),
         // never on every idle tick, so a quiet screen stays quiet after it fades.
@@ -826,6 +834,23 @@ fn suspend_tui() -> io::Result<()> {
     execute!(io::stdout(), LeaveAlternateScreen)
 }
 
+/// Choose the baseline for a fresh controller. An absent or invalid config value arrives as
+/// `None`, so the existing root-aware default remains authoritative.
+fn initial_baseline(default: Baseline, configured: Option<Baseline>) -> Baseline {
+    configured.unwrap_or(default)
+}
+
+/// Build the initial controller from the resolved root and settings. Keeping this seam pure over
+/// its injected components makes the config-to-controller baseline handoff directly testable.
+fn startup_controller(
+    resolved: root::Resolved,
+    eff: &crate::config::EffectiveSettings,
+    components: Components,
+) -> Controller {
+    let baseline = initial_baseline(git::default_baseline(&resolved), eff.baseline);
+    Controller::new_with_changed_file_view(resolved, baseline, components, eff.changed_file_view)
+}
+
 /// Re-enter raw mode + the alternate screen after the editor returns, and re-arm mouse capture
 /// for the viewer (best-effort, matching `run`'s setup).
 fn resume_tui() -> io::Result<()> {
@@ -868,6 +893,7 @@ fn bundled_style_path(exe: Option<&Path>) -> Option<String> {
 /// config > `$EDITOR` > platform default.
 fn settings_wired(
     eff: &crate::config::EffectiveSettings,
+    baseline: Baseline,
     os: crate::opener::OsKind,
     platform_editor: Option<std::ffi::OsString>,
 ) -> crate::help::SettingsWired {
@@ -875,6 +901,7 @@ fn settings_wired(
         editor: crate::config::effective_editor(eff, platform_editor),
         open: crate::opener::default_opener_display(os, crate::opener::OpenAction::Open),
         reveal: crate::opener::default_opener_display(os, crate::opener::OpenAction::Reveal),
+        baseline,
     }
 }
 
@@ -920,6 +947,51 @@ fn default_renderers() -> Renderers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_baseline_uses_configured_value_or_preserves_the_context_default() {
+        assert_eq!(
+            initial_baseline(Baseline::Base, None),
+            Baseline::Base,
+            "an absent or invalid config value keeps the feature-branch default"
+        );
+        assert_eq!(
+            initial_baseline(Baseline::Head, None),
+            Baseline::Head,
+            "an absent or invalid config value keeps the default-branch default"
+        );
+        assert_eq!(
+            initial_baseline(Baseline::Base, Some(Baseline::Head)),
+            Baseline::Head
+        );
+        assert_eq!(
+            initial_baseline(Baseline::Head, Some(Baseline::Base)),
+            Baseline::Base
+        );
+    }
+
+    #[test]
+    fn configured_baseline_reaches_the_initial_controller() {
+        for (configured, expected) in [
+            (Some(" HEAD "), Baseline::Head),
+            (Some("base"), Baseline::Base),
+            (Some("unrecognized"), Baseline::Head),
+        ] {
+            let eff = crate::config::resolve(
+                &crate::config::Config {
+                    baseline: configured.map(str::to_owned),
+                    ..crate::config::Config::default()
+                },
+                |_| None,
+            );
+            let (controller, _root) = route_controller_with_settings("startup-baseline", &eff);
+            assert_eq!(
+                controller.baseline(),
+                expected,
+                "{configured:?} must flow from config through startup selection into Controller"
+            );
+        }
+    }
 
     // ---- resolve_editor: default-editor platform seam (AC-8, T-5) --------------
 
@@ -1017,6 +1089,14 @@ mod tests {
     }
 
     fn route_controller(tag: &str) -> (Controller, PathBuf) {
+        let eff = crate::config::resolve(&crate::config::Config::default(), |_| None);
+        route_controller_with_settings(tag, &eff)
+    }
+
+    fn route_controller_with_settings(
+        tag: &str,
+        eff: &crate::config::EffectiveSettings,
+    ) -> (Controller, PathBuf) {
         let root = tmp(tag);
         std::fs::write(root.join("note.rs"), "fn main() {}\n").unwrap();
         let resolved = crate::root::Resolved {
@@ -1026,9 +1106,9 @@ mod tests {
             is_worktree: false,
             base_branch: None,
         };
-        let controller = Controller::new(
+        let controller = startup_controller(
             resolved,
-            Baseline::Head,
+            eff,
             Components {
                 providers: Box::new(|_| RootProviders {
                     git: Arc::new(RouteGit),
@@ -1312,7 +1392,12 @@ mod tests {
             editor: Some(std::ffi::OsString::from("nvim")),
             ..crate::config::resolve(&crate::config::Config::default(), |_| None)
         };
-        let w = settings_wired(&eff, OsKind::Mac, Some(std::ffi::OsString::from("vi")));
+        let w = settings_wired(
+            &eff,
+            Baseline::Base,
+            OsKind::Mac,
+            Some(std::ffi::OsString::from("vi")),
+        );
         assert_eq!(
             w.editor,
             Some(std::ffi::OsString::from("nvim")),
@@ -1333,7 +1418,13 @@ mod tests {
 
         // No config editor: the platform default is what the row must report.
         let bare = crate::config::resolve(&crate::config::Config::default(), |_| None);
-        let w = settings_wired(&bare, OsKind::Linux, Some(std::ffi::OsString::from("vi")));
+        let w = settings_wired(
+            &bare,
+            Baseline::Head,
+            OsKind::Linux,
+            Some(std::ffi::OsString::from("vi")),
+        );
+        assert_eq!(w.baseline, Baseline::Head);
         assert_eq!(w.editor, Some(std::ffi::OsString::from("vi")));
     }
 

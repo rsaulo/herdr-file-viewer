@@ -24,7 +24,11 @@ use ratatui::text::Text;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
+};
 use std::time::{Duration, Instant};
 
 /// A fake Git Service that knows nothing — the reroot seam needs no real git.
@@ -63,6 +67,29 @@ impl GitService for CannedGit {
     }
     fn diff(&self, _rel: &Path, _baseline: Baseline, _full: bool) -> String {
         self.diff.clone()
+    }
+    fn diff_directory(&self, _rel_dir: &Path, _baseline: Baseline) -> String {
+        String::new()
+    }
+}
+
+/// Blocks a re-root's background git refresh after it starts, so a test can exercise the
+/// otherwise tiny interval between creating the fresh tree and applying its changed-only filter.
+struct GatedStatusGit {
+    entered: mpsc::Sender<()>,
+    release: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+impl GitService for GatedStatusGit {
+    fn status(&self) -> BTreeMap<PathBuf, Status> {
+        let _ = self.entered.send(());
+        let _ = self.release.lock().unwrap().recv();
+        BTreeMap::new()
+    }
+    fn changed_set(&self, _baseline: Baseline) -> BTreeMap<PathBuf, Status> {
+        BTreeMap::new()
+    }
+    fn diff(&self, _rel: &Path, _baseline: Baseline, _full: bool) -> String {
+        String::new()
     }
     fn diff_directory(&self, _rel_dir: &Path, _baseline: Baseline) -> String {
         String::new()
@@ -160,6 +187,105 @@ fn fake_factory() -> Box<dyn Fn(&Resolved) -> RootProviders> {
         git: Arc::new(FakeGit),
         content: Box::new(FakeContent),
     })
+}
+
+#[test]
+fn re_root_scopes_gitignores_to_the_new_repository_boundary() {
+    // The fresh TreeModel created by re_root must receive the newly resolved Git-root flag. An
+    // unrelated .gitignore above B must not hide B/vendor after the switch.
+    let a = TempDir::new();
+    common::init_repo_with_commit(a.path());
+    std::fs::write(a.path().join("a.txt"), "a\n").unwrap();
+
+    let outer = TempDir::new();
+    std::fs::write(outer.path().join(".gitignore"), "vendor/\n").unwrap();
+    let b = outer.path().join("inner");
+    std::fs::create_dir_all(b.join("vendor")).unwrap();
+    common::init_repo_with_commit(&b);
+    std::fs::write(b.join("vendor/keep.txt"), "k\n").unwrap();
+
+    let components = Components {
+        providers: fake_factory(),
+        editor: Box::new(FakeEditor),
+        clipboard: Box::new(FakeClipboard),
+        renderers: None,
+    };
+    let mut ctrl = Controller::new(
+        common::resolved(a.path().to_path_buf(), true),
+        Baseline::Head,
+        components,
+    );
+    ctrl.re_root(&b);
+
+    assert!(
+        ctrl.tree()
+            .visible_nodes()
+            .iter()
+            .any(|node| node.path.file_name().is_some_and(|name| name == "vendor")),
+        "re-rooted tree must not inherit an unrelated parent .gitignore"
+    );
+}
+
+#[test]
+fn collapse_walk_up_is_inert_while_a_changed_only_reroot_refresh_is_pending() {
+    let a = TempDir::new();
+    let b = TempDir::new();
+    common::init_repo_with_commit(a.path());
+    common::init_repo_with_commit(b.path());
+    std::fs::create_dir_all(b.path().join("dir")).unwrap();
+    std::fs::write(b.path().join("dir/file.txt"), "x").unwrap();
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let components = Components {
+        providers: Box::new(move |_resolved: &Resolved| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                RootProviders {
+                    git: Arc::new(FakeGit),
+                    content: Box::new(FakeContent),
+                }
+            } else {
+                RootProviders {
+                    git: Arc::new(GatedStatusGit {
+                        entered: entered_tx.clone(),
+                        release: Arc::clone(&release_rx),
+                    }),
+                    content: Box::new(FakeContent),
+                }
+            }
+        }),
+        editor: Box::new(FakeEditor),
+        clipboard: Box::new(FakeClipboard),
+        renderers: None,
+    };
+    let mut ctrl = Controller::new(
+        common::resolved(a.path().to_path_buf(), true),
+        Baseline::Head,
+        components,
+    );
+    ctrl.handle(Intent::ToggleChangedOnly);
+    ctrl.re_root(b.path());
+    entered_rx
+        .recv()
+        .expect("the re-root status refresh started and is held open");
+
+    ctrl.handle(Intent::Expand); // expand dir in the fresh, temporarily unfiltered tree
+    ctrl.handle(Intent::NavDown); // select dir/file.txt
+    let fx = ctrl.handle(Intent::Collapse);
+    assert!(
+        !fx.redraw,
+        "changed-only must suppress walk-up before its fresh tree filter arrives"
+    );
+    assert_eq!(
+        ctrl.tree().selected().unwrap().path,
+        common::canon(b.path()).join("dir/file.txt"),
+        "the selected file stays put while the changed-only refresh is pending"
+    );
+    release_tx
+        .send(())
+        .expect("release the re-root status refresh before the test exits");
 }
 
 #[test]

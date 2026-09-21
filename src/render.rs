@@ -9,7 +9,7 @@ use crate::view_policy::ViewMode;
 use ansi_to_tui::IntoText;
 use ratatui::text::Text;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -78,11 +78,41 @@ fn truncate_to_bytes(s: &mut String, max_bytes: u64) {
     s.truncate(end);
 }
 
+/// Why a path that is not a binary file cannot be previewed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnavailableReason {
+    /// The path no longer exists or could not be resolved.
+    Missing,
+    /// The final path is a symlink whose target cannot be resolved.
+    BrokenSymlink,
+    /// The resolved path leaves the viewed root and is deliberately refused.
+    OutsideViewedRoot,
+    /// The resolved path is not a regular file.
+    NotRegular,
+    /// The resolved regular file could not be opened or read.
+    Unreadable,
+}
+
+impl UnavailableReason {
+    /// The safe, path-free placeholder shown in the content pane.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Missing => "[file not found: preview not shown]",
+            Self::BrokenSymlink => "[broken symlink: target does not exist]",
+            Self::OutsideViewedRoot => "[outside the viewed root: not shown]",
+            Self::NotRegular => "[not a regular file: not shown]",
+            Self::Unreadable => "[unreadable file: preview not shown]",
+        }
+    }
+}
+
 /// The guarded result of reading a file's content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prepared {
     /// A binary file: a placeholder is shown, never the raw bytes (AC-12).
     Binary,
+    /// A non-binary path that cannot safely be previewed, with a specific explanation.
+    Unavailable { reason: UnavailableReason },
     /// A file at/above the size cap: a bounded preview plus a visible notice (AC-13).
     Truncated { text: String, notice: String },
     /// A normal text file shown in full.
@@ -94,31 +124,67 @@ pub enum Prepared {
 ///
 /// Refuses to read anything that does not resolve to a **regular file inside `root`**:
 /// a symlink (or `..`) escaping the root cannot leak out-of-root content into the pane
-/// (AC-N5), and a FIFO/device/dir is never opened (no hang, no garbage). Such paths
-/// return `Binary` (a placeholder, no bytes).
+/// (AC-N5), and a FIFO/device/dir is never opened (no hang, no garbage). Such paths return an
+/// [`Prepared::Unavailable`] placeholder explaining why no preview is available.
 pub fn classify(root: &Path, path: &Path, caps: Caps) -> Prepared {
-    let (Ok(canonical), Ok(canon_root)) = (path.canonicalize(), root.canonicalize()) else {
-        return Prepared::Binary; // unresolvable / missing
+    let Ok(canon_root) = root.canonicalize() else {
+        return Prepared::Unavailable {
+            reason: UnavailableReason::Missing,
+        };
+    };
+    let canonical = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            // A link whose target exists but cannot be traversed also has symlink metadata, so
+            // preserve PermissionDenied before inferring that a link is broken from `lstat`.
+            let reason = if error.kind() == ErrorKind::PermissionDenied {
+                UnavailableReason::Unreadable
+            } else {
+                match std::fs::symlink_metadata(path) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        UnavailableReason::BrokenSymlink
+                    }
+                    Err(metadata_error) if metadata_error.kind() == ErrorKind::PermissionDenied => {
+                        UnavailableReason::Unreadable
+                    }
+                    _ => UnavailableReason::Missing,
+                }
+            };
+            return Prepared::Unavailable { reason };
+        }
     };
     if !canonical.starts_with(&canon_root) {
-        return Prepared::Binary; // escapes the root (AC-N5)
+        return Prepared::Unavailable {
+            reason: UnavailableReason::OutsideViewedRoot,
+        }; // escapes the root (AC-N5)
     }
     match std::fs::metadata(&canonical) {
         Ok(m) if m.is_file() => {}
-        _ => return Prepared::Binary, // dir / FIFO / device / gone
+        Ok(_) => {
+            return Prepared::Unavailable {
+                reason: UnavailableReason::NotRegular,
+            };
+        } // dir / FIFO / device
+        Err(_) => {
+            return Prepared::Unavailable {
+                reason: UnavailableReason::Unreadable,
+            };
+        } // vanished or became inaccessible after canonicalization
     }
 
     let byte_len = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
     let Ok(file) = File::open(&canonical) else {
-        return Prepared::Binary; // unreadable (e.g. permissions) → placeholder, not a misleading empty pane
-    };
+        return Prepared::Unavailable {
+            reason: UnavailableReason::Unreadable,
+        };
+    }; // unreadable (e.g. permissions) → placeholder, not a misleading empty pane
     // Bounded read: at most caps.max_bytes, so a giant/hostile file is never slurped whole. The
     // config resolver clamps the cap to a finite ceiling, so even a configured value keeps this
     // guarantee (AC-N1).
     let mut buf = Vec::new();
     if file.take(caps.max_bytes).read_to_end(&mut buf).is_err() {
-        return Prepared::Full {
-            text: String::new(),
+        return Prepared::Unavailable {
+            reason: UnavailableReason::Unreadable,
         };
     }
 
@@ -221,9 +287,10 @@ pub fn render(
         );
     }
 
-    // Content modes: a binary file shows a placeholder, never raw bytes (AC-12).
+    // Content modes: binary and unavailable paths show placeholders, never raw bytes (AC-12).
     let (content, base_notice) = match prepared {
         Prepared::Binary => return (Text::raw("[binary file: preview not shown]"), None),
+        Prepared::Unavailable { reason } => return (Text::raw(reason.label()), None),
         Prepared::Full { text } => (text.as_str(), None),
         Prepared::Truncated { text, notice } => (text.as_str(), Some(notice.clone())),
     };
@@ -948,7 +1015,9 @@ mod tests {
         symlink(&outside, &link).unwrap();
         assert_eq!(
             classify(&root, &link, Caps::default()),
-            Prepared::Binary,
+            Prepared::Unavailable {
+                reason: UnavailableReason::OutsideViewedRoot,
+            },
             "AC-N5: no out-of-root read"
         );
         fs::remove_dir_all(&root).ok();
@@ -972,13 +1041,171 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_non_regular_file() {
+    fn labels_a_missing_path_without_reading_it() {
         let root = unique_dir("root");
-        // a directory is not a regular file
+        let missing = root.join("missing.txt");
+        assert_eq!(
+            classify(&root, &missing, Caps::default()),
+            Prepared::Unavailable {
+                reason: UnavailableReason::Missing,
+            }
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn labels_an_unreadable_regular_file_without_calling_it_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_dir("root");
+        let file = root.join("locked.txt");
+        fs::write(&file, "secret").unwrap();
+        let original_permissions = fs::metadata(&file).unwrap().permissions();
+        let mut locked_permissions = original_permissions.clone();
+        locked_permissions.set_mode(0o000);
+        fs::set_permissions(&file, locked_permissions).unwrap();
+
+        // A privileged test identity can read mode-000 files. In that environment this fixture
+        // cannot exercise the File::open error branch, so skip rather than asserting a false OS
+        // guarantee. The test runs on ordinary Unix CI identities.
+        if File::open(&file).is_ok() {
+            fs::set_permissions(&file, original_permissions).unwrap();
+            fs::remove_dir_all(&root).ok();
+            return;
+        }
+
+        assert_eq!(
+            classify(&root, &file, Caps::default()),
+            Prepared::Unavailable {
+                reason: UnavailableReason::Unreadable,
+            }
+        );
+        fs::set_permissions(&file, original_permissions).unwrap();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn labels_a_symlink_to_an_unreadable_target_as_unreadable() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = unique_dir("root");
+        let private = root.join("private");
+        fs::create_dir_all(&private).unwrap();
+        let target = private.join("secret.txt");
+        fs::write(&target, "secret").unwrap();
+        let link = root.join("link.txt");
+        symlink("private/secret.txt", &link).unwrap();
+        let original_permissions = fs::metadata(&private).unwrap().permissions();
+        let mut locked_permissions = original_permissions.clone();
+        locked_permissions.set_mode(0o000);
+        fs::set_permissions(&private, locked_permissions).unwrap();
+
+        // As above, privileged identities can traverse this fixture and cannot exercise the
+        // PermissionDenied canonicalization branch.
+        if link.canonicalize().is_ok() {
+            fs::set_permissions(&private, original_permissions).unwrap();
+            fs::remove_dir_all(&root).ok();
+            return;
+        }
+
+        assert_eq!(
+            classify(&root, &link, Caps::default()),
+            Prepared::Unavailable {
+                reason: UnavailableReason::Unreadable,
+            }
+        );
+        fs::set_permissions(&private, original_permissions).unwrap();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn labels_a_broken_symlink_without_reading_it() {
+        use std::os::unix::fs::symlink;
+        let root = unique_dir("root");
+        let link = root.join("missing-target");
+        symlink("does-not-exist", &link).unwrap();
+        assert_eq!(
+            classify(&root, &link, Caps::default()),
+            Prepared::Unavailable {
+                reason: UnavailableReason::BrokenSymlink,
+            }
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn labels_a_non_regular_file_without_reading_it() {
+        let root = unique_dir("root");
+        // A directory is not a regular file.
         let sub = root.join("subdir");
         fs::create_dir_all(&sub).unwrap();
-        assert_eq!(classify(&root, &sub, Caps::default()), Prepared::Binary);
+        assert_eq!(
+            classify(&root, &sub, Caps::default()),
+            Prepared::Unavailable {
+                reason: UnavailableReason::NotRegular,
+            }
+        );
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unavailable_reasons_render_their_distinct_safe_labels() {
+        let renderers = Renderers {
+            markdown: vec![],
+            diff: vec![],
+            full_diff: vec![],
+            syntax: vec![],
+            timeout: Duration::from_secs(1),
+        };
+        for (reason, expected) in [
+            (
+                UnavailableReason::Missing,
+                "[file not found: preview not shown]",
+            ),
+            (
+                UnavailableReason::BrokenSymlink,
+                "[broken symlink: target does not exist]",
+            ),
+            (
+                UnavailableReason::OutsideViewedRoot,
+                "[outside the viewed root: not shown]",
+            ),
+            (
+                UnavailableReason::NotRegular,
+                "[not a regular file: not shown]",
+            ),
+            (
+                UnavailableReason::Unreadable,
+                "[unreadable file: preview not shown]",
+            ),
+        ] {
+            let (text, notice) = render(
+                &renderers,
+                &Prepared::Unavailable { reason },
+                ViewMode::SyntaxContent,
+                None,
+                None,
+                Caps::default(),
+            );
+            assert_eq!(text.lines[0].spans[0].content, expected);
+            assert_eq!(notice, None);
+        }
+        let (binary, notice) = render(
+            &renderers,
+            &Prepared::Binary,
+            ViewMode::SyntaxContent,
+            None,
+            None,
+            Caps::default(),
+        );
+        assert_eq!(
+            binary.lines[0].spans[0].content,
+            "[binary file: preview not shown]"
+        );
+        assert_eq!(notice, None);
     }
 
     #[test]

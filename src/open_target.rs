@@ -51,6 +51,10 @@ pub enum CliAction {
     LaunchDecision,
     /// Print a tab-launcher decision from stdin JSON, then exit.
     LaunchDecisionTab,
+    /// Print the configured `open_direction` (`right` / `down`) on one line, then exit. The
+    /// launcher scripts ask for it so the herdr split goes where `config.toml` says; reading no
+    /// stdin and touching no layout, it is safe for them to call on every summon.
+    PrintOpenDirection,
     /// Start the TUI; `open` is the raw `--open` value when present (env is layered in `app::run`).
     Run { open: Option<String> },
 }
@@ -60,7 +64,9 @@ pub enum CliAction {
 /// Degrades, never fails:
 /// - unknown flags are ignored (herdr may append args we do not control)
 /// - a bare `--open` with no value is ignored (start with no open target)
-/// - `--launch-decision` / `--launch-decision-tab` win over a normal run (and over `--open`)
+/// - `--launch-decision` / `--launch-decision-tab` win over a normal run (and over `--open`),
+///   and over `--open-direction` — a launcher asking for a decision wants the decision.
+/// - `--open-direction` otherwise wins over a normal run: it is a query, not a session.
 ///
 /// `--open` values must not look like flags (`-…`); a following `-x` is left for the next
 /// iteration so it can be ignored as unknown rather than treated as a path.
@@ -72,6 +78,7 @@ where
     let mut open_flag: Option<String> = None;
     let mut launch_tab = false;
     let mut launch = false;
+    let mut print_direction = false;
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         let arg = arg.as_ref();
@@ -83,6 +90,9 @@ where
             "--launch-decision-tab" => {
                 launch = true;
                 launch_tab = true;
+            }
+            "--open-direction" => {
+                print_direction = true;
             }
             "--open" => {
                 let take = args
@@ -113,6 +123,8 @@ where
         } else {
             CliAction::LaunchDecision
         }
+    } else if print_direction {
+        CliAction::PrintOpenDirection
     } else {
         CliAction::Run { open: open_flag }
     }
@@ -492,6 +504,48 @@ mod tests {
         // `--open --nope` must not treat `--nope` as the path.
         assert_eq!(
             parse_args(["--open", "--nope"]),
+            CliAction::Run { open: None }
+        );
+    }
+
+    #[test]
+    fn parse_args_open_direction() {
+        // The launcher's config probe: a query that must never start a TUI in the pane.
+        assert_eq!(
+            parse_args(["--open-direction"]),
+            CliAction::PrintOpenDirection
+        );
+    }
+
+    #[test]
+    fn parse_args_open_direction_wins_over_a_run_but_loses_to_launch_decision() {
+        // It outranks `--open` (a query, not a session) …
+        assert_eq!(
+            parse_args(["--open", "src/a.rs", "--open-direction"]),
+            CliAction::PrintOpenDirection
+        );
+        // … and yields to a launch decision in either order, so a launcher that somehow passes
+        // both still gets the OPEN/FOCUS/CLOSE line it is about to branch on.
+        assert_eq!(
+            parse_args(["--open-direction", "--launch-decision"]),
+            CliAction::LaunchDecision
+        );
+        assert_eq!(
+            parse_args(["--launch-decision", "--open-direction"]),
+            CliAction::LaunchDecision
+        );
+    }
+
+    #[test]
+    fn parse_args_open_direction_is_exact_not_a_prefix() {
+        // Degrade-don't-die: a near-miss spelling is an unknown flag, so the viewer starts
+        // normally instead of printing a direction into a pane the user is looking at.
+        assert_eq!(
+            parse_args(["--open-directions"]),
+            CliAction::Run { open: None }
+        );
+        assert_eq!(
+            parse_args(["--open-direction=down"]),
             CliAction::Run { open: None }
         );
     }

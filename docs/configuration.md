@@ -47,8 +47,8 @@ A config key always wins. Only two keys also have an environment-variable fallba
 config key and above the built-in default — `editor` (`$EDITOR`) and `update_check`
 (`$HERDR_FILE_VIEWER_NO_UPDATE_CHECK`) — giving those two a `config > env > default` chain. Every
 other key (`markdown`, `diff`, `syntax`, `open`, `reveal`, `hide_dotfiles`, `show_ignored`,
-`compact_dirs`, `changed_file_view`, `confirm_discard`, `scroll_lines`, `tree_width`,
-`tree_position`, `tree_max_cols`, `preview_max_lines`, `preview_max_kib`) has no
+`compact_dirs`, `changed_file_view`, `baseline`, `confirm_discard`, `scroll_lines`, `tree_width`,
+`tree_position`, `tree_max_cols`, `open_direction`, `preview_max_lines`, `preview_max_kib`) has no
 applicable environment variable; for those it's `config > default` only.
 
 ## Keys
@@ -69,12 +69,14 @@ hide_dotfiles = false       # true to hide dotfiles at startup (the `.` key stil
 show_ignored = false        # true to show gitignored files at startup (the `i` key still toggles)
 compact_dirs = false        # true to draw a chain of single-child dirs as ONE row (src/main/java)
 changed_file_view = "diff"  # changed files start in "diff", or use normal "content" by file type
+baseline = "base"           # force startup diff baseline: "base" or "head" (omit for context-smart default)
 update_check = true         # false disables all remote requests and their display
 confirm_discard = true      # false to discard annotations without confirming (on quit / worktree switch)
 scroll_lines = 3            # mouse-wheel step (content/search/help), a 1 to 10 scale: 1 slow · 3 medium · 6 fast · 10 max
 tree_width = 30             # tree column's share of the viewer pane, percent 20-80 (content takes the rest)
 tree_max_cols = 30          # HARD CAP in columns; the SMALLER of this and tree_width% wins (raise both to widen)
 tree_position = "left"      # which side the directory tree sits on: "left" (default) or "right"
+open_direction = "right"    # which way the summon key splits your pane: "right" (default) or "down"
 
 preview_max_lines = 10000   # show at most this many lines before a truncated preview (100–100000)
 preview_max_kib = 1024      # ...or this size before truncating, in KiB (1024 = 1 MB; 64–65536)
@@ -94,6 +96,13 @@ views, and the setting does not change Git status markers, changed-only filterin
 baseline, git-status mode (`d`), or `D`'s unified/side-by-side/plain diff presentation. Values are
 trimmed and case-insensitive; an unrecognized value falls back defensively to `"diff"`.
 
+`baseline` selects only the initial Git **diff baseline**. Set it to `"base"` to compare the full
+body of work since the base branch's merge-base, or `"head"` to compare working-tree changes only.
+When omitted or unrecognized, the viewer keeps its context-smart default: base on a feature branch
+or worktree, `HEAD` on the default branch. The `?` Settings section shows the baseline actually
+selected at startup, including that context-smart result. The `b` key still toggles between the two
+baselines during the session. This does not enable git-status mode (`d`) or change any tree filter.
+
 `tree_width` and `tree_max_cols` **together** decide the tree's startup width, and the **smaller of
 the two wins**: the tree is drawn at `min(tree_width% of the pane, tree_max_cols)`. So if you set
 `tree_width = 50` and nothing changes, `tree_max_cols` (default 30 columns) is capping it: raise
@@ -103,6 +112,15 @@ instead of a mostly-blank tree (it only bites past ~100 columns). `tree_position
 the `left` (default) or `right`. All three set the **startup** split inside the viewer's own pane
 (not the herdr pane, which the host decides); you can still resize live with the grow/shrink keys or
 by dragging the divider, and an explicit resize lifts the cap.
+
+`open_direction` is the one layout key that *does* reach the herdr pane. It chooses which way the
+summon action splits the pane you invoke it from: `"right"` (the default — viewer beside your work)
+or `"down"` (viewer underneath, terminal keeping the top half). `"bottom"` is accepted as a synonym
+for `"down"`; values are trimmed and case-insensitive, and anything unrecognized falls back to
+`"right"`. Two scoping notes: the **tab** action (`open-file-viewer-tab`) ignores it, because a tab
+has no direction; and the launcher reads it at summon time, so it applies to the **next** viewer you
+open, not to one already on screen. See [Summoning the viewer](summoning.md) for the actions
+themselves.
 
 `preview_max_lines` and `preview_max_kib` cap how much of a file the content pane shows: a file is
 displayed in full until it exceeds **either** cap, then the pane shows a truncated preview with a
@@ -188,7 +206,7 @@ customized).
 | | `page_up` | `PageUp` | Move up one screenful (content pane when focused, else the tree cursor) |
 | | `page_down` | `PageDown`, `Space` | Move down one screenful (content pane when focused, else the tree cursor) |
 | | `expand` | `Right`, `l` | Expand the selected directory |
-| | `collapse` | `Left`, `h` | Collapse the selected directory |
+| | `collapse` | `Left`, `h` | Collapse a directory, or walk up from a file/collapsed directory in the normal tree |
 | | `activate` | `Enter` | Activate the selection: expand/collapse a directory, or open a file |
 | **View & layout** | `open_fullscreen` | `Z` | Toggle full-screen reading of the selected file |
 | | `cycle_view` | `v` | Cycle the content pane's view mode |

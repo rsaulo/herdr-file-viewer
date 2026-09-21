@@ -237,6 +237,62 @@ fn cursor_moves_and_stays_in_bounds_when_filters_shrink_the_list() {
 }
 
 #[test]
+fn is_git_repo_bounds_ancestor_gitignore_at_the_repo_boundary() {
+    // Regression test: `walk_builder`'s ancestor `.gitignore` search (`parents(true)`) has no
+    // stop-at-repo-boundary option of its own; `require_git` is the only knob that bounds it,
+    // and it must be told about `root`'s OWN repo, not left at the crate default. Fixture: an
+    // OUTER directory (not a repo) whose `.gitignore` ignores `vendor/`, containing an INNER git
+    // repo that has its own, unrelated `vendor/` directory. The outer rule has nothing to do
+    // with the inner repo and must not reach into it.
+    let outer = TempDir::new();
+    fs::write(outer.path().join(".gitignore"), "vendor/\n").unwrap();
+    let inner = outer.path().join("inner");
+    fs::create_dir_all(inner.join("vendor")).unwrap();
+    init_repo_with_commit(&inner);
+    fs::write(inner.join("vendor/keep.txt"), "k").unwrap();
+
+    // Without telling the tree it's rooted at a repo, the ancestor climb is unbounded (today's
+    // `require_git(false)` default) and picks up the outer `vendor/` rule anyway.
+    let unbounded = TreeModel::new(&inner);
+    assert!(
+        !names(&unbounded).contains(&"vendor".to_string()),
+        "sanity check: the outer ancestor .gitignore reaches in when is_git_repo is never set"
+    );
+
+    // `set_is_git_repo(true)` bounds the search at `inner`'s own `.git`, so the outer rule no
+    // longer applies.
+    let mut bounded = TreeModel::new(&inner);
+    bounded.set_is_git_repo(true);
+    assert!(
+        names(&bounded).contains(&"vendor".to_string()),
+        "an unrelated ancestor .gitignore outside the repo must not hide files inside it"
+    );
+
+    // In-repo ignore inheritance must still apply below the root. Expanding `sub` makes this
+    // walk climb to the repository root for `root-hidden.log`, while its own .gitignore filters
+    // `secret.log`; the boundary must not blanket-disable either rule.
+    let sub = inner.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(inner.join(".gitignore"), "root-hidden.log\n").unwrap();
+    fs::write(sub.join(".gitignore"), "secret.log\n").unwrap();
+    fs::write(sub.join("root-hidden.log"), "r").unwrap();
+    fs::write(sub.join("secret.log"), "s").unwrap();
+    let mut still_filters_own_gitignore = TreeModel::new(&inner);
+    still_filters_own_gitignore.set_is_git_repo(true);
+    still_filters_own_gitignore.expand(&sub);
+    let names = names(&still_filters_own_gitignore);
+    assert!(names.contains(&"vendor".to_string()));
+    assert!(
+        !names.contains(&"root-hidden.log".to_string()),
+        "the repository root's .gitignore applies while walking a child directory"
+    );
+    assert!(
+        !names.contains(&"secret.log".to_string()),
+        "the repo's in-subdirectory .gitignore still applies"
+    );
+}
+
+#[test]
 fn status_markers_attach_to_nodes() {
     let dir = TempDir::new();
     fs::write(dir.path().join("m.txt"), "m").unwrap();

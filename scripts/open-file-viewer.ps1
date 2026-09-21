@@ -70,10 +70,29 @@ function Get-ConfigDir {
     return ''
 }
 
+# The configured split direction (`open_direction`), asked of the same binary that computes the
+# launch decision so the lenient value rules live in one tested place. Takes the config dir as a
+# parameter because this launcher spawns the viewer itself and so never inherits
+# HERDR_PLUGIN_CONFIG_DIR (see Get-ConfigDir). Defaults to `right` -- today's layout -- on ANY
+# failure, and only `down` is accepted back, so nothing unvalidated reaches the argv.
+function Get-OpenDirection([string]$cfgDir) {
+    try {
+        $prev = $env:HERDR_PLUGIN_CONFIG_DIR
+        if ($cfgDir) { $env:HERDR_PLUGIN_CONFIG_DIR = $cfgDir }
+        try {
+            $d = (& $ViewerBin --open-direction 2>$null | Out-String).Trim()
+        } finally {
+            $env:HERDR_PLUGIN_CONFIG_DIR = $prev
+        }
+        if ($d -eq 'down') { return 'down' }
+    } catch {}
+    return 'right'
+}
+
 function Open-Pane {
     $cwd = Get-UserCwd
-    $splitArgs = @('pane', 'split', '--direction', 'right', '--cwd', $cwd, '--focus')
     $cfg = Get-ConfigDir
+    $splitArgs = @('pane', 'split', '--direction', (Get-OpenDirection $cfg), '--cwd', $cwd, '--focus')
     if ($cfg) { $splitArgs += @('--env', "HERDR_PLUGIN_CONFIG_DIR=$cfg") }
     $out = (& $HerdrBin @splitArgs | Out-String)
     $np = Get-PaneId $out

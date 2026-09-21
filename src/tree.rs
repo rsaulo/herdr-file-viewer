@@ -146,6 +146,12 @@ pub struct TreeModel {
     cursor: usize,
     show_ignored: bool,
     hide_hidden: bool,
+    /// Whether `root` is itself a git repository — bounds the ancestor `.gitignore` search at
+    /// `root`'s own repo boundary instead of letting it climb into an unrelated enclosing
+    /// directory/repository above `root` (see `index::walk_builder`). `false` until the owner
+    /// sets it via [`set_is_git_repo`](Self::set_is_git_repo); every existing caller (tests
+    /// included) that never calls it keeps today's `require_git(false)` behavior.
+    is_git_repo: bool,
     changed_only: bool,
     /// Draw a chain of single-child directories as one row (`src/main/java`) instead of one row
     /// per segment. Off by default; seeded once at startup from the `compact_dirs` config key.
@@ -183,6 +189,7 @@ impl TreeModel {
             cursor: 0,
             show_ignored: false,
             hide_hidden: false,
+            is_git_repo: false,
             changed_only: false,
             compact_dirs: false,
             folds: RefCell::new(HashMap::new()),
@@ -238,6 +245,16 @@ impl TreeModel {
     /// them (e.g. when opening a `$HOME` flooded with dotfiles).
     pub fn set_hide_hidden(&mut self, on: bool) {
         self.hide_hidden = on;
+        self.invalidate_compaction();
+        self.clamp_cursor();
+    }
+
+    /// Tell the tree whether `root` is itself a git repository, so its ancestor `.gitignore`
+    /// search bounds at `root`'s own repo boundary instead of climbing into an unrelated
+    /// enclosing directory/repository above it (see `index::walk_builder`). Set once from the
+    /// resolved launch context (and again on every re-root); a session never toggles it live.
+    pub fn set_is_git_repo(&mut self, on: bool) {
+        self.is_git_repo = on;
         self.invalidate_compaction();
         self.clamp_cursor();
     }
@@ -475,7 +492,7 @@ impl TreeModel {
     /// (unless `show_ignored`), dot-prefixed entries dropped when `hide_hidden` (#46), `.git` always
     /// hidden. Lazy — the caller decides how much of it to consume. Read-only.
     fn walk_children(&self, dir: &Path) -> impl Iterator<Item = ignore::DirEntry> {
-        let mut builder = walk_builder(dir);
+        let mut builder = walk_builder(dir, self.is_git_repo);
         builder
             .max_depth(Some(1))
             // Dotfiles (e.g. .gitignore, .github) show by default; the hide-hidden toggle (#46)
@@ -578,6 +595,19 @@ impl TreeModel {
     /// The currently-selected node, if any.
     pub fn selected(&self) -> Option<Node> {
         self.visible_nodes().into_iter().nth(self.cursor)
+    }
+
+    /// Move the cursor to `path`'s visible row, without changing expansion or filters.
+    pub(crate) fn select(&mut self, path: &Path) -> bool {
+        let Some(cursor) = self
+            .visible_nodes()
+            .iter()
+            .position(|node| node.path == path)
+        else {
+            return false;
+        };
+        self.cursor = cursor;
+        true
     }
 
     /// Expand every ancestor directory of `path`, from its parent up to and including the root, so
