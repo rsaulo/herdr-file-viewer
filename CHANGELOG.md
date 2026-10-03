@@ -12,6 +12,7 @@ All notable changes to this project are documented here. The format is based on
 - `g` (`open_rich_preview`) opens HTML or Markdown (converted to HTML) in `terminal-browser` in a right split. → [keys](docs/keys.md) · [configuration](docs/configuration.md)
 
 ### Fixed
+- Recover the initial pane layout without a keypress when a split resize notification is missed during startup. Root headers and the `? help` footer no longer remain clipped or wrapped until focus/navigation; unchanged idle frames still do not redraw. → [usage](docs/usage.md#the-tree)
 - Dismissing a project Spotlight with `u` now remembers it across launches instead of showing the same promotion every time. Changed spotlight titles/bodies can appear again; release notices remain session-only and What's New keeps all details. → [usage](docs/usage.md#staying-up-to-date)
 - Media rasters and browser previews now share the text renderer's in-root regular-file guard, blocking out-of-root symlinks and traversal. → [usage](docs/usage.md#handing-a-file-off)
 - Images no longer obscure help, pickers, annotation dialogs, or discard confirmation; closing a modal restores the retained raster.
