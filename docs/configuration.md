@@ -84,7 +84,8 @@ preview_max_kib = 1024      # ...or this size before truncating, in KiB (1024 = 
 
 `update_check` governs release details and project spotlights. `false` disables all remote requests
 and their display. When the key is unset, `$HERDR_FILE_VIEWER_NO_UPDATE_CHECK` also disables it.
-No separate spotlight setting exists.
+No separate spotlight setting exists. Pressing `u` remembers the current spotlight across launches
+without disabling release notices; see [Staying up to date](usage.md#staying-up-to-date).
 The system `curl` is optional: without it, document retrieval is unavailable without an error.
 
 `changed_file_view` controls only the automatic initial view for Git-changed files. Its default,
@@ -242,7 +243,7 @@ customized).
 | | `prev_match` | `N` | Jump to the previous search match (wraps) |
 | | `next_changed` | `]` | Jump the tree cursor to the next changed file (wraps) |
 | | `prev_changed` | `[` | Jump the tree cursor to the previous changed file (wraps) |
-| **Session** | `dismiss_update` | `u` | Dismiss the advisory status row for this session |
+| **Session** | `dismiss_update` | `u` | Dismiss the advisory status row for this session; remember the current Spotlight across launches |
 | | `switch_worktree` | `W` | Open the worktree picker to re-root at another git worktree |
 | | `show_help` | `?` | Open the in-app help overlay (What's New and About) |
 | | `close` | `q`, `Esc` | Close the viewer and return to the prior pane |

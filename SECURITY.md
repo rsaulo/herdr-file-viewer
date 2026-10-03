@@ -29,8 +29,10 @@ collaborator handed you. Its security posture is built around that.
   combined release-details text); `404` withdraws a spotlight, while every other failure
   becomes typed, fail-silent outcomes. Remote Markdown reaches the configured renderer only on
   stdin and passes the terminal-control neutralizer, with no content-triggered actions. The
-  complete, atomic, safe-to-delete cache (`update-check.json`) is the sole viewer-owned write and
-  never affects the viewed root or Git repository.
+  complete, atomic, safe-to-delete cache (`update-check.json`) and explicit spotlight dismissal
+  record (`spotlight-dismissal.json`) are the only viewer-owned persistent writes. The bounded
+  dismissal record stores the last dismissed accepted title/body separately, so remote refreshes
+  cannot overwrite it. Neither file affects the viewed root or Git repository.
 
 - **Untrusted repository → hardened git invocations.** Because the opened repo may be hostile,
   queries disable configured clean, smudge, and process filters, and use `--no-ext-diff` /

@@ -934,6 +934,10 @@ pub struct Controller {
     /// `u` key). It is never reset by a later background replacement, so the current process
     /// cannot revive a dismissed line.
     update_dismissed: bool,
+    /// Only the last accepted spotlight explicitly dismissed by the user; independent of refreshes.
+    dismissed_spotlight: Option<update::dismissal::DismissedSpotlight>,
+    /// Injected advisory persistence. `None` keeps construction and tests free of cache I/O.
+    spotlight_dismissal_store: Option<Box<dyn update::dismissal::SpotlightDismissalStore>>,
     /// One-shot receiver for a background notice replacement (`None` when no check ran).
     notice_rx: Option<mpsc::Receiver<NoticeSnapshot>>,
     /// One-shot receiver for a re-root's off-thread status/changed-set computation (AC-17).
@@ -1125,6 +1129,8 @@ impl Controller {
             settings_display: None,
             keybindings_display: None,
             update_dismissed: false,
+            dismissed_spotlight: None,
+            spotlight_dismissal_store: None,
             notice_rx: None,
             status_rx: None,
             modal: Modal::None,
@@ -1618,6 +1624,15 @@ impl Controller {
     /// Record the pane width the run loop observed (session state, AC-21).
     pub fn set_width(&mut self, width: u16) {
         self.width = width;
+    }
+
+    /// Inject the optional spotlight dismissal record before the first draw. No remote I/O.
+    pub fn set_spotlight_dismissal_store(
+        &mut self,
+        store: Box<dyn update::dismissal::SpotlightDismissalStore>,
+    ) {
+        self.dismissed_spotlight = store.load();
+        self.spotlight_dismissal_store = Some(store);
     }
 
     /// Install the initial remote-notice snapshot plus the receiver a background probe uses to
@@ -3385,14 +3400,22 @@ impl Controller {
         Effects::redraw()
     }
 
-    /// Hide the visible remote-notice line for this session (`u`). This never changes the
-    /// snapshot or cache, so What's New stays available and a fresh session can show the same row.
+    /// Hide the visible remote-notice line for this session (`u`) and remember its spotlight.
+    /// The snapshot and refresh cache stay unchanged, so What's New and release notices survive.
     fn dismiss_update(&mut self) -> Effects {
         if self.remote_notice_status().is_none() {
             return Effects::noop();
         }
 
         self.update_dismissed = true;
+        if let Some(dismissed) =
+            update::dismissal::DismissedSpotlight::from_spotlight(&self.notice_snapshot.spotlight)
+        {
+            if let Some(store) = &self.spotlight_dismissal_store {
+                store.save(&dismissed);
+            }
+            self.dismissed_spotlight = Some(dismissed);
+        }
         Effects::redraw()
     }
 
@@ -3405,6 +3428,7 @@ impl Controller {
         update::status::format_status(
             &self.notice_snapshot,
             self.update_dismissed,
+            self.dismissed_spotlight.as_ref(),
             details_key.as_deref(),
             dismiss_key.as_deref(),
         )

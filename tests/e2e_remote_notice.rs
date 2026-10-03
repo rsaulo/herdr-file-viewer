@@ -13,6 +13,7 @@ use expectrl::process::unix::{PtyStream, UnixProcess, WaitStatus};
 use expectrl::process::{NonBlocking, Process};
 use expectrl::{Eof, Expect, Session};
 use herdr_file_viewer::update::cache::{self, Cache, PersistedReleaseDetails};
+use herdr_file_viewer::update::dismissal::{FileSpotlightDismissalStore, SpotlightDismissalStore};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -109,6 +110,77 @@ fn seed_fresh_notices(cache_dir: &Path) {
             spotlight_retrieved_at_unix: Some(now),
             ..Cache::default()
         },
+    );
+}
+
+#[test]
+fn spotlight_dismissal_survives_real_process_relaunch_and_keeps_updates() {
+    let workspace = TempDir::new();
+    let support = TempDir::new();
+    std::fs::write(workspace.path().join("notice.txt"), "workspace bytes\n").unwrap();
+    let cache_base = support.path().join("cache");
+    let cache_dir = cache_base.join("herdr-file-viewer");
+    seed_fresh_notices(&cache_dir);
+    let config_dir = support.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "update_check = true\nsyntax = \"sh -c cat\"\n",
+    )
+    .unwrap();
+
+    for (expected, dismiss) in [
+        ("Spotlight: Display-only spotlight", true),
+        ("Update v9.2.0 available", false),
+        ("Spotlight: Changed spotlight", false),
+    ] {
+        if expected.contains("Changed") {
+            let mut refreshed = cache::load(&cache_dir).unwrap();
+            refreshed.spotlight = Some(b"# Changed spotlight\nchanged body\n".to_vec());
+            cache::store(&cache_dir, &refreshed);
+        }
+        let mut cmd = viewer_command_with_notices(workspace.path());
+        cmd.env("XDG_CACHE_HOME", &cache_base)
+            .env("HERDR_PLUGIN_CONFIG_DIR", &config_dir)
+            .env_remove("HERDR_PLUGIN_CONTEXT_JSON")
+            .env_remove("HERDR_FILE_VIEWER_OPEN");
+        let transcript = Transcript(Arc::new(Mutex::new(Vec::new())));
+        let mut process = UnixProcess::spawn_command(cmd).unwrap();
+        let stream = process.open_stream().unwrap();
+        let mut session =
+            Session::new(process, TranscriptStream::new(stream, transcript.clone())).unwrap();
+        session.set_expect_timeout(Some(Duration::from_secs(15)));
+        session
+            .expect(expected)
+            .expect("observe the required notice before sending keys");
+        if dismiss {
+            session.send("u").unwrap();
+        }
+        // No modal, selection, search, or zoom was entered: q can quit from this observed state.
+        session.send("q").unwrap();
+        session.expect(Eof).unwrap();
+        assert!(matches!(
+            session.get_process().wait().unwrap(),
+            WaitStatus::Exited(_, 0)
+        ));
+        assert!(
+            FileSpotlightDismissalStore::new(cache_dir.clone())
+                .load()
+                .is_some()
+        );
+
+        if !dismiss && !expected.contains("Changed") {
+            let output = transcript.0.lock().unwrap();
+            assert!(
+                !String::from_utf8_lossy(&output).contains("Spotlight:"),
+                "the unchanged promotion must be absent from the COMPLETE relaunched-process transcript"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_dir(workspace.path()).unwrap().count(),
+        1,
+        "no viewed-root writes"
     );
 }
 

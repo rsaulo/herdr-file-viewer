@@ -13,6 +13,7 @@ use herdr_file_viewer::controller::{
 use herdr_file_viewer::git::{Baseline, Status};
 use herdr_file_viewer::intent::Intent;
 use herdr_file_viewer::update::cache::{self, Cache};
+use herdr_file_viewer::update::dismissal::{FileSpotlightDismissalStore, SpotlightDismissalStore};
 use herdr_file_viewer::update::spotlight_policy::{
     SpotlightCache, SpotlightInput, cache_delta, project,
 };
@@ -347,7 +348,9 @@ fn update_dismissal_is_session_only_and_never_persists() {
 }
 
 #[test]
-fn dismissal_writes_no_identity_and_every_still_relevant_notice_returns_next_session() {
+// Without the app-injected store, the controller remains hermetic and all persistence is absent.
+// Keep the original session-only assertions for this unwired boundary, not the live application.
+fn unwired_controller_keeps_dismissal_ephemeral_and_never_touches_disk() {
     let session_started_at_unix = 10_000;
     let spotlight = b"# Project\nbody\n".to_vec();
     let cases = [
@@ -432,6 +435,218 @@ fn dismissal_writes_no_identity_and_every_still_relevant_notice_returns_next_ses
             "{name}: the same still-relevant row returns in a fresh session"
         );
     }
+}
+
+fn persistent_controller(root: &Path, cache_dir: &Path) -> Controller {
+    let mut controller = controller_in(root);
+    controller.set_spotlight_dismissal_store(Box::new(FileSpotlightDismissalStore::new(
+        cache_dir.to_path_buf(),
+    )));
+    controller
+}
+
+#[test]
+fn persisted_spotlight_dismissal_survives_relaunch_without_hiding_release_notices_or_details() {
+    let now = 10_000;
+    for (name, release, spotlight, expected_status) in [
+        (
+            "update-only",
+            Some("9.9.9"),
+            None,
+            Some("Update v9.9.9 available · ? details · u dismiss"),
+        ),
+        (
+            "spotlight-only",
+            None,
+            Some(b"# Project\nbody\n".to_vec()),
+            None,
+        ),
+        (
+            "combined",
+            Some("9.9.9"),
+            Some(b"# Project\nbody\n".to_vec()),
+            Some("Update v9.9.9 available · ? details · u dismiss"),
+        ),
+    ] {
+        let root = TempDir::new();
+        let dir = TempDir::new();
+        let persisted = Cache {
+            last_check_unix: now,
+            latest_seen: release.map(str::to_owned),
+            spotlight: spotlight.clone(),
+            spotlight_retrieved_at_unix: spotlight.as_ref().map(|_| now),
+            ..Cache::default()
+        };
+        cache::store(dir.path(), &persisted);
+        let mut first = persistent_controller(root.path(), dir.path());
+        first.set_update(UpdateState {
+            initial: snapshot_from_cache(persisted.clone(), now),
+            rx: None,
+        });
+        assert!(
+            first.view_state().remote_notice_status.is_some(),
+            "{name}: precondition"
+        );
+        assert!(first.handle(Intent::DismissUpdate).redraw);
+        assert_eq!(first.view_state().remote_notice_status, None);
+        assert!(
+            !first.handle(Intent::DismissUpdate).redraw,
+            "repeat dismissal is inert"
+        );
+        drop(first);
+
+        assert_eq!(
+            cache::load(dir.path()),
+            Some(persisted.clone()),
+            "{name}: refresh cache is unchanged"
+        );
+        assert_eq!(
+            FileSpotlightDismissalStore::new(dir.path().to_path_buf())
+                .load()
+                .is_some(),
+            spotlight.is_some(),
+            "{name}: only a spotlight creates a persistent record"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "the viewed root stays read-only"
+        );
+
+        let mut next = persistent_controller(root.path(), dir.path());
+        next.set_update(UpdateState {
+            initial: snapshot_from_cache(cache::load(dir.path()).unwrap(), now),
+            rx: None,
+        });
+        assert_eq!(
+            next.view_state().remote_notice_status.as_deref(),
+            expected_status,
+            "{name}: relaunch"
+        );
+        if spotlight.is_some() {
+            assert_eq!(
+                next.notice_snapshot().spotlight.whats_new_body(),
+                Some(b"body\n".as_slice())
+            );
+            next.handle(Intent::ShowHelp);
+            let body = next
+                .help_state()
+                .unwrap()
+                .active_body()
+                .lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(
+                body.contains("body"),
+                "{name}: dismissed details remain in What's New"
+            );
+        }
+        // The remote coordinator may publish another complete snapshot, but never this record.
+        cache::store(
+            dir.path(),
+            &Cache {
+                last_check_unix: now + 1,
+                ..persisted
+            },
+        );
+        assert_eq!(
+            FileSpotlightDismissalStore::new(dir.path().to_path_buf())
+                .load()
+                .is_some(),
+            spotlight.is_some(),
+            "{name}: refresh publication cannot erase a dismissal"
+        );
+    }
+}
+
+#[test]
+fn persisted_dismissal_filters_identical_background_refreshes_but_not_changed_spotlights() {
+    let root = TempDir::new();
+    let dir = TempDir::new();
+    let original = snapshot(None, Some("Project"));
+    let mut first = persistent_controller(root.path(), dir.path());
+    first.set_update(UpdateState {
+        initial: original.clone(),
+        rx: None,
+    });
+    assert!(first.handle(Intent::DismissUpdate).redraw);
+    drop(first);
+
+    let (tx, rx) = mpsc::channel();
+    let mut next = persistent_controller(root.path(), dir.path());
+    // A stale startup cache may initially supply no spotlight. The dismissal must still filter
+    // the later fresh remote result; sending before poll forces this path without a sleep.
+    next.set_update(UpdateState {
+        initial: NoticeSnapshot::default(),
+        rx: Some(rx),
+    });
+    tx.send(original).unwrap();
+    assert!(next.poll().unwrap().redraw);
+    assert_eq!(
+        next.view_state().remote_notice_status,
+        None,
+        "identical fresh result stays dismissed"
+    );
+
+    for (document, visible) in [
+        ("\n\n# Project\nbody\n", false),
+        ("# Renamed\nbody\n", true),
+        ("# Project\nchanged body\n", true),
+    ] {
+        let (tx, rx) = mpsc::channel();
+        next.set_update(UpdateState {
+            initial: NoticeSnapshot::default(),
+            rx: Some(rx),
+        });
+        tx.send(snapshot_from_spotlight_input(SpotlightInput::Available(
+            document.as_bytes().to_vec(),
+        )))
+        .unwrap();
+        assert!(next.poll().unwrap().redraw);
+        assert_eq!(
+            next.view_state().remote_notice_status.is_some(),
+            visible,
+            "{document:?}"
+        );
+    }
+
+    std::fs::remove_file(dir.path().join("spotlight-dismissal.json")).unwrap();
+    let mut restored = persistent_controller(root.path(), dir.path());
+    restored.set_update(UpdateState {
+        initial: snapshot(None, Some("Project")),
+        rx: None,
+    });
+    assert!(
+        restored.view_state().remote_notice_status.is_some(),
+        "deleting the advisory record resets dismissal"
+    );
+}
+
+#[test]
+fn failed_spotlight_persistence_still_dismisses_the_current_session() {
+    let root = TempDir::new();
+    let dir = TempDir::new();
+    std::fs::create_dir(dir.path().join("spotlight-dismissal.json")).unwrap();
+    let mut first = persistent_controller(root.path(), dir.path());
+    first.set_update(UpdateState {
+        initial: snapshot(None, Some("Project")),
+        rx: None,
+    });
+    assert!(first.handle(Intent::DismissUpdate).redraw);
+    assert_eq!(first.view_state().remote_notice_status, None);
+    drop(first);
+
+    let mut next = persistent_controller(root.path(), dir.path());
+    next.set_update(UpdateState {
+        initial: snapshot(None, Some("Project")),
+        rx: None,
+    });
+    assert!(
+        next.view_state().remote_notice_status.is_some(),
+        "a failed save stays fail-silent and session-only"
+    );
 }
 
 #[test]

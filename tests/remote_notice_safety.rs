@@ -9,6 +9,7 @@ use herdr_file_viewer::controller::{
 use herdr_file_viewer::git::{Baseline, Status};
 use herdr_file_viewer::intent::Intent;
 use herdr_file_viewer::opener::{Opener, OpenerOutcome};
+use herdr_file_viewer::update::dismissal::{FileSpotlightDismissalStore, SpotlightDismissalStore};
 use herdr_file_viewer::update::spotlight_policy::{
     SpotlightCache, SpotlightInput, cache_delta, project,
 };
@@ -151,6 +152,10 @@ fn displaying_and_dismissing_remote_details_never_calls_external_ports_or_mutate
     controller.set_opener(Box::new(SpyOpener {
         calls: Arc::clone(&opener_calls),
     }));
+    let cache_dir = TempDir::new();
+    controller.set_spotlight_dismissal_store(Box::new(FileSpotlightDismissalStore::new(
+        cache_dir.path().to_path_buf(),
+    )));
     controller.set_update(UpdateState {
         initial: snapshot(),
         rx: None,
@@ -183,6 +188,11 @@ fn displaying_and_dismissing_remote_details_never_calls_external_ports_or_mutate
     controller.close_help();
     assert!(controller.handle(Intent::DismissUpdate).redraw);
     assert!(controller.view_state().remote_notice_status.is_none());
+    assert!(
+        FileSpotlightDismissalStore::new(cache_dir.path().to_path_buf())
+            .load()
+            .is_some()
+    );
     assert_eq!(
         workspace_fingerprint(dir.path()),
         workspace_before,

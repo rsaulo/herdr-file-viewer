@@ -6,6 +6,7 @@
 
 pub mod cache;
 pub mod compose;
+pub mod dismissal;
 pub mod gateway;
 pub mod release_policy;
 pub mod spotlight_policy;

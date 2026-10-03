@@ -358,6 +358,18 @@ fn remote_notice_docs_keep_their_controls_and_boundaries() {
     );
 
     let usage = section(USAGE_DOC, "## Staying up to date", "\n## ");
+    for required in [
+        "across launches",
+        "title or body changes",
+        "release notices",
+        "spotlight-dismissal.json",
+        "**What's New** remains readable",
+    ] {
+        assert!(
+            usage.contains(required),
+            "remote-notice docs must explain {required:?}"
+        );
+    }
     assert!(
         usage.contains("display-only"),
         "remote notices must retain their display-only boundary"
