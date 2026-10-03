@@ -16,6 +16,7 @@ All notable changes to this project are documented here. The format is based on
 - Show committed branch changes (`M`/`A` and dirty-directory dots/colors) in the full tree from startup, without needing to toggle `c`. Baseline switches and refreshes also update the markers when the filter is off; `d` stays working-tree-only. → [usage](docs/usage.md#git-awareness)
 - Mouse selection now follows terminal cell width across full-width CJK text, including wrapped and horizontally-scrolled content. Thanks @nonhana (#143) → [usage](docs/usage.md#using-the-mouse)
 - Markdown code-block comments and generic subheadings now meet the WCAG 4.5:1 contrast minimum against the fixed code background. → [renderers](docs/renderers.md#bundled-markdown-palette)
+- Dismissing a project Spotlight with `u` now remembers it across launches instead of showing the same promotion every time. Changed spotlight titles/bodies can appear again; release notices remain session-only and What's New keeps all details. → [usage](docs/usage.md#staying-up-to-date)
 
 ### Changed
 - The tab action (`prefix+shift+f`) now switches only to a viewer showing the repo you are in, so a viewer opened on another directory no longer captures it. To support this, a running viewer keeps its working directory on the root it shows (renderers, the editor and other tools it starts still run from the plugin directory). → [summoning](docs/summoning.md#open-in-a-tab-instead-of-a-split)

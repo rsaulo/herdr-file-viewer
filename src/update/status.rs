@@ -4,6 +4,7 @@
 //! the key registry. Spotlight text comes only from the policy's safe status-title accessor.
 
 use super::NoticeSnapshot;
+use super::dismissal::DismissedSpotlight;
 
 /// The canonical fallback label for an unbound remote-notice status hint.
 const UNBOUND_KEY_LABEL: &str = "(unbound)";
@@ -14,6 +15,7 @@ const UNBOUND_KEY_LABEL: &str = "(unbound)";
 pub fn format_status(
     snapshot: &NoticeSnapshot,
     session_dismissed: bool,
+    dismissed_spotlight: Option<&DismissedSpotlight>,
     details_key: Option<&str>,
     dismiss_key: Option<&str>,
 ) -> Option<String> {
@@ -25,7 +27,9 @@ pub fn format_status(
     if let Some(release) = snapshot.detected_release {
         parts.push(format!("Update v{release} available"));
     }
-    if let Some(title) = snapshot.spotlight.status_title() {
+    if let Some(title) = snapshot.spotlight.status_title()
+        && !dismissed_spotlight.is_some_and(|dismissed| dismissed.matches(&snapshot.spotlight))
+    {
         parts.push(format!("Spotlight: {title}"));
     }
     if parts.is_empty() {
@@ -171,7 +175,8 @@ mod tests {
         ];
 
         for (name, snapshot, session_dismissed, details_key, dismiss_key, expected) in cases {
-            let actual = format_status(&snapshot, session_dismissed, details_key, dismiss_key);
+            let actual =
+                format_status(&snapshot, session_dismissed, None, details_key, dismiss_key);
             assert_eq!(actual.as_deref(), expected, "{name}");
             assert!(
                 !actual
@@ -203,6 +208,7 @@ mod tests {
                 format_status(
                     &snapshot(Some(update), None),
                     false,
+                    None,
                     details_key,
                     Some("F2 / F3"),
                 )

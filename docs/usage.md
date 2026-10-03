@@ -402,8 +402,19 @@ border so the overlay is discoverable without already knowing the key.
 ## Staying up to date
 
 The viewer can show an advisory status row for a newer release or project spotlight. `?` opens
-**What's New** first; `u` dismisses the whole advisory status row for this session only. It is
-display-only and never installs, opens, or copies anything. Control remote notices with
+**What's New** first; `u` dismisses the whole advisory status row for this session and remembers
+the current spotlight across launches. The same spotlight stays hidden from the status row until
+its title or body changes; release notices can return next session while you are still behind.
+**What's New** remains readable, including dismissed spotlight details. Installing a promoted
+project does not dismiss its spotlight: the viewer does not inspect installed applications.
+
+The safe-to-delete `spotlight-dismissal.json` file lives beside `update-check.json` in the plugin's
+cache directory (`$XDG_CACHE_HOME/herdr-file-viewer`, default `~/.cache/herdr-file-viewer` on Unix;
+`%LOCALAPPDATA%\\herdr-file-viewer` on Windows). It remembers only the last explicitly dismissed
+spotlight; deleting it allows that spotlight to appear again. If saving fails, `u` still hides the
+row for the current session.
+
+The advisory content is display-only and never installs, opens, or copies anything. Control remote notices with
 [`update_check`](configuration.md).
 
 ## Using the mouse

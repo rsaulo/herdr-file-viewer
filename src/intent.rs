@@ -104,8 +104,9 @@ pub enum Intent {
     /// Re-read git state (working-tree status + changed-set) and re-render, so the viewer picks
     /// up changes made outside it — a merge, pull, or commit in another pane. Read-only.
     Refresh,
-    /// Dismiss the "update available" banner for this session (it returns next launch while
-    /// still behind). Read-only — touches only in-memory UI state.
+    /// Dismiss the advisory row for this session and remember its Spotlight across launches.
+    /// Release notices remain session-only. Only plugin-owned advisory storage is touched;
+    /// viewed files and git remain read-only.
     DismissUpdate,
     /// Open the worktree picker to re-root the viewer at another git worktree of the current
     /// repository (the worktree switch). Read-only — it re-roots the in-pane view; it never

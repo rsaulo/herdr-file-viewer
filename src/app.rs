@@ -184,9 +184,13 @@ pub fn run(open_flag: Option<String>) -> io::Result<()> {
     // without source or cache work, while enabled startup returns the initial snapshot and one
     // refresh receiver. `start_default()` would re-read HERDR_FILE_VIEWER_NO_UPDATE_CHECK and let
     // the env silently override a config `update_check = true` (AC-3/AC-10).
-    controller.set_update(crate::update::start_default_with(
-        !crate::config::should_start_update_check(&eff),
-    ));
+    let update_check_enabled = crate::config::should_start_update_check(&eff);
+    if update_check_enabled && let Some(dir) = crate::update::cache::cache_dir() {
+        controller.set_spotlight_dismissal_store(Box::new(
+            crate::update::dismissal::FileSpotlightDismissalStore::new(dir),
+        ));
+    }
+    controller.set_update(crate::update::start_default_with(!update_check_enabled));
     // Inject the herdr query channel + the viewer's own workspace id for the worktree picker's
     // agent-active overlay (AC-3) — the first real use of the host seam. `ctx` is still in
     // scope (only borrowed by `root::resolve`). A missing/failing herdr degrades to a git-only

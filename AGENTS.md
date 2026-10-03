@@ -67,8 +67,9 @@ and the spec chain):
 - **Editor Launcher**: hand a file off to an external editor in-process, suspending and resuming the
   TUI around it (NOT a herdr pane — see the herdr integration section)
 
-State is **in-memory and ephemeral only** except for the safe-to-delete, advisory
-`update-check.json` cache, which never changes the viewed root or git repo.
+State is **in-memory and ephemeral only** except for the safe-to-delete advisory files:
+`update-check.json` caches remote notices and `spotlight-dismissal.json` remembers the last
+explicitly dismissed spotlight. Neither changes the viewed root or git repo.
 (`ARCHITECTURE.md` is the committed module map; keep it current.)
 
 ### Load-bearing constraints (from `constitution.md`)

@@ -130,7 +130,14 @@ pub fn load(dir: &Path) -> Option<Cache> {
 }
 
 fn load_bounded(dir: &Path, max_bytes: usize) -> Option<Cache> {
-    let file = File::open(dir.join(CACHE_FILE)).ok()?;
+    let raw = read_bounded(dir, CACHE_FILE, max_bytes)?;
+    let cache: Cache = serde_json::from_slice(&raw).ok()?;
+    cache.is_valid().then_some(cache)
+}
+
+/// Read a fixed advisory file without letting an oversized input reach JSON parsing.
+pub(crate) fn read_bounded(dir: &Path, file_name: &str, max_bytes: usize) -> Option<Vec<u8>> {
+    let file = File::open(dir.join(file_name)).ok()?;
     let mut raw = Vec::new();
     file.take((max_bytes + 1) as u64)
         .read_to_end(&mut raw)
@@ -138,8 +145,7 @@ fn load_bounded(dir: &Path, max_bytes: usize) -> Option<Cache> {
     if raw.len() > max_bytes {
         return None;
     }
-    let cache: Cache = serde_json::from_slice(&raw).ok()?;
-    cache.is_valid().then_some(cache)
+    Some(raw)
 }
 
 /// Best-effort persist of one complete cache snapshot. It writes a unique sibling staging file,
@@ -150,7 +156,7 @@ pub fn store(dir: &Path, cache: &Cache) {
 }
 
 fn store_bounded(dir: &Path, cache: &Cache, max_bytes: usize) {
-    if !cache.is_valid() || std::fs::create_dir_all(dir).is_err() {
+    if !cache.is_valid() {
         return;
     }
     let Ok(json) = serde_json::to_vec(cache) else {
@@ -160,21 +166,29 @@ fn store_bounded(dir: &Path, cache: &Cache, max_bytes: usize) {
         return;
     }
 
-    let Some((staged_path, mut staged)) = create_staging_file(dir) else {
+    publish(dir, CACHE_FILE, &json);
+}
+
+/// Atomically publish one complete fixed-name advisory record, never merging unrelated writers.
+pub(crate) fn publish(dir: &Path, file_name: &str, bytes: &[u8]) {
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let Some((staged_path, mut staged)) = create_staging_file(dir, file_name) else {
         return;
     };
     let result = (|| -> std::io::Result<()> {
-        staged.write_all(&json)?;
+        staged.write_all(bytes)?;
         drop(staged);
-        std::fs::rename(staged_path.as_path(), dir.join(CACHE_FILE))
+        std::fs::rename(staged_path.as_path(), dir.join(file_name))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(staged_path);
     }
 }
 
-fn create_staging_file(dir: &Path) -> Option<(PathBuf, File)> {
-    let path = staging_path(dir);
+fn create_staging_file(dir: &Path, file_name: &str) -> Option<(PathBuf, File)> {
+    let path = staging_path(dir, file_name);
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -183,14 +197,14 @@ fn create_staging_file(dir: &Path) -> Option<(PathBuf, File)> {
         .map(|file| (path, file))
 }
 
-fn staging_path(dir: &Path) -> PathBuf {
+fn staging_path(dir: &Path, file_name: &str) -> PathBuf {
     let sequence = STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     dir.join(format!(
-        "{CACHE_FILE}.{}-{nanos}-{sequence}.tmp",
+        "{file_name}.{}-{nanos}-{sequence}.tmp",
         std::process::id()
     ))
 }
