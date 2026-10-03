@@ -593,6 +593,7 @@ struct RenderCompletion {
 
 struct RasterJob {
     seq: u64,
+    root: PathBuf,
     path: PathBuf,
 }
 
@@ -1224,7 +1225,7 @@ impl Controller {
                 while let Ok(newer) = job_rx.try_recv() {
                     job = newer;
                 }
-                let png = media::rasterize_png(&job.path);
+                let png = media::rasterize_png(&job.root, &job.path);
                 if done_tx
                     .send(RasterDone {
                         seq: job.seq,
@@ -2915,7 +2916,7 @@ impl Controller {
         let path = node.path.clone();
         match media::kind(&path) {
             MediaKind::Html | MediaKind::Markdown | MediaKind::Pdf | MediaKind::Image => {
-                match media::browser_url(&path) {
+                match media::browser_url(&self.root, &path) {
                     Some(url) => match media::open_in_terminal_browser(&url) {
                         Ok(()) => {
                             self.set_flash("Opened in terminal-browser");
@@ -3677,6 +3678,7 @@ impl Controller {
             MediaKind::Pdf | MediaKind::Image => {
                 let _ = self.raster_tx.send(RasterJob {
                     seq,
+                    root: self.root.clone(),
                     path: node.path.clone(),
                 });
             }

@@ -1,0 +1,3 @@
+# This fork includes media previews absent from the official release of the same version.
+# Both fetch-or-build scripts must compile this checkout instead of downloading upstream binaries.
+# See docs/install.md: Building this media-preview fork.

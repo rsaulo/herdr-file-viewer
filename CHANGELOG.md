@@ -11,6 +11,11 @@ All notable changes to this project are documented here. The format is based on
 - In-pane PDF/image preview: the first PDF page (`pdftoppm`) and common image formats rasterize to PNG and draw via Kitty graphics when the terminal supports it. → [usage](docs/usage.md#handing-a-file-off) · [keys](docs/keys.md)
 - `g` (`open_rich_preview`) opens HTML or Markdown (converted to HTML) in `terminal-browser` in a right split. → [keys](docs/keys.md) · [configuration](docs/configuration.md)
 
+### Fixed
+- Media rasters and browser previews now share the text renderer's in-root regular-file guard, blocking out-of-root symlinks and traversal. → [usage](docs/usage.md#handing-a-file-off)
+- Images no longer obscure help, pickers, annotation dialogs, or discard confirmation; closing a modal restores the retained raster.
+- This fork's `.build-from-source` marker makes both build scripts skip official prebuilts, preserving media features even at the same version as upstream. → [install](docs/install.md#building-this-media-preview-fork)
+
 ## [1.17.0] - 2026-09-16
 
 ### Added

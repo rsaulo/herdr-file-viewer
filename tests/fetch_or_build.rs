@@ -159,6 +159,11 @@ mod unix_sh {
         // (non-git) temp root so it is skipped and the platform/download/verify logic is what's under
         // test; the git-checkout tests pass a real git repo here.
         let fv_repo_root: &Path = repo_root.unwrap_or(root.as_path());
+        // Source-only tests begin with an existing fork binary; the cargo stub leaves it intact.
+        if fv_repo_root.join(".build-from-source").is_file() {
+            fs::create_dir_all(out.parent().unwrap()).unwrap();
+            fs::write(&out, b"existing fork binary").unwrap();
+        }
         let path = format!("{}:{}", stub.display(), std::env::var("PATH").unwrap());
         let output = Command::new("sh")
             .arg(script_path())
@@ -224,6 +229,27 @@ mod unix_sh {
         g(&["commit", "-q", "-m", "release"]);
         let head = g(&["rev-parse", "HEAD"]);
         String::from_utf8_lossy(&head.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn source_only_fork_skips_even_a_matching_verified_release() {
+        let repo = tmp("source-only-fork");
+        fs::write(repo.join(".build-from-source"), "fork build policy\n").unwrap();
+        let o = run_impl("Darwin", "arm64", "1.17.0", true, false, Some(&repo), None);
+        assert!(o.fell_back(), "stdout: {}\nstderr: {}", o.stdout, o.stderr);
+        assert!(!o.installed_prebuilt());
+        assert_eq!(
+            o.placed.as_deref(),
+            Some(&b"existing fork binary"[..]),
+            "never place the official binary over the fork"
+        );
+        assert!(
+            o.urls.is_empty(),
+            "not even a COMMIT/download probe: {:?}",
+            o.urls
+        );
+        assert!(o.stderr.contains(".build-from-source"));
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -538,10 +564,27 @@ function Invoke-WebRequest {{
     /// the BINARY-mode ` *` marker that Git-for-Windows `sha256sum` emits on the release runner
     /// (vs the two-space text form Linux/macOS produce).
     fn run_sep(version: &str, serve_binary: bool, corrupt_sums: bool, sums_sep: &str) -> Outcome {
+        run_policy(version, serve_binary, corrupt_sums, sums_sep, false)
+    }
+
+    fn run_policy(
+        version: &str,
+        serve_binary: bool,
+        corrupt_sums: bool,
+        sums_sep: &str,
+        source_only: bool,
+    ) -> Outcome {
         let root = tmp("root-ps1");
+        if source_only {
+            fs::write(root.join(".build-from-source"), "fork build policy\n").unwrap();
+        }
         let stub = root.join("bin");
         let server = root.join("server");
         let out = root.join("target/release/herdr-file-viewer.exe");
+        if source_only {
+            fs::create_dir_all(out.parent().unwrap()).unwrap();
+            fs::write(&out, b"existing fork binary").unwrap();
+        }
         let urllog = root.join("urls.log");
         fs::create_dir_all(&stub).unwrap();
         fs::create_dir_all(&server).unwrap();
@@ -614,6 +657,24 @@ function Invoke-WebRequest {{
         };
         let _ = fs::remove_dir_all(&root);
         o
+    }
+
+    #[test]
+    fn source_only_fork_skips_even_a_matching_verified_release() {
+        let o = run_policy("1.17.0", true, false, "  ", true);
+        assert!(o.fell_back(), "stdout: {}\nstderr: {}", o.stdout, o.stderr);
+        assert!(!o.installed_prebuilt());
+        assert_eq!(
+            o.placed.as_deref(),
+            Some(&b"existing fork binary"[..]),
+            "never place the official binary over the fork"
+        );
+        assert!(
+            o.urls.is_empty(),
+            "not even a COMMIT/download probe: {:?}",
+            o.urls
+        );
+        assert!(o.stderr.contains(".build-from-source"));
     }
 
     /// (a) matching prebuilt + correct SHA → installs to FV_OUT, exits 0 without invoking cargo.

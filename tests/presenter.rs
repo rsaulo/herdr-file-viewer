@@ -28,6 +28,87 @@ fn node(path: &str, kind: NodeKind, depth: usize, expanded: bool, status: Option
     }
 }
 
+#[test]
+fn media_layer_is_retained_but_suppressed_for_every_modal_overlay() {
+    use herdr_file_viewer::presenter::draw_with_content_overlay;
+    use ratatui::widgets::{Clear, Paragraph};
+
+    let mut confirm = sample_state();
+    confirm.discard_confirm = Some(DiscardConfirmView {
+        rows: annotation_rows(),
+        verb: "quit",
+        proceed_key: "q",
+    });
+    let cases = [
+        ("help", help_state()),
+        ("picker", picker_state()),
+        ("finder", finder_state_with_matches()),
+        (
+            "annotations",
+            annotation_overview_state(annotation_rows(), 0),
+        ),
+        (
+            "annotation editor",
+            annotation_editor_state(AnnotationEditorKind::Add),
+        ),
+        ("discard confirm", confirm),
+    ];
+    for (name, state) in cases {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut called = false;
+        terminal
+            .draw(|frame| {
+                draw_with_content_overlay(frame, &state, |frame| {
+                    called = true;
+                    // Simulate a graphics widget that clears and owns the entire content area.
+                    let area = frame.area();
+                    frame.render_widget(Clear, area);
+                    frame.render_widget(Paragraph::new("MEDIA OVER MODAL"), area);
+                });
+            })
+            .unwrap();
+        assert!(
+            !called,
+            "{name}: do not let graphics skip-cells obscure the modal"
+        );
+        assert_eq!(
+            terminal.backend().buffer(),
+            &render_buffer(&state, 100, 24),
+            "{name}: the whole modal frame remains unchanged",
+        );
+    }
+
+    // An open/close cycle restores the retained media layer, without needing a new raster job.
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut calls = 0;
+    for state in [sample_state(), help_state(), sample_state()] {
+        terminal
+            .draw(|frame| {
+                draw_with_content_overlay(frame, &state, |frame| {
+                    calls += 1;
+                    let area = herdr_file_viewer::presenter::geometry(frame.area(), &state)
+                        .content_inner
+                        .unwrap();
+                    frame.render_widget(Clear, area);
+                    frame.render_widget(Paragraph::new("RETAINED MEDIA"), area);
+                });
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        calls, 2,
+        "draw before opening help and again after closing it"
+    );
+    let final_frame: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(final_frame.contains("RETAINED MEDIA"));
+}
+
 /// A known tree+content+notices state, wide enough for the two-column layout.
 fn sample_state() -> ViewState {
     let nodes = vec![

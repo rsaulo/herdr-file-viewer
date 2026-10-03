@@ -1610,6 +1610,18 @@ pub fn geometry(area: Rect, state: &ViewState) -> PaneGeometry {
 /// taken from the **live frame width** (via [`columns`]), so it can never disagree with the
 /// geometry it is drawn into (a stale `state.width` cannot desync the layout).
 pub fn draw(frame: &mut Frame, state: &ViewState) -> PreviewViewports {
+    draw_with_content_overlay(frame, state, |_| {})
+}
+
+/// Draw an optional media layer between the content and modal layers.
+/// Suppress the callback while any popup is open: graphics widgets can mark whole rows as
+/// skipped, so painting popup text afterward is not sufficient for every graphics protocol.
+/// Closing the modal invokes the callback again, restoring the retained raster.
+pub fn draw_with_content_overlay(
+    frame: &mut Frame,
+    state: &ViewState,
+    content_overlay: impl FnOnce(&mut Frame),
+) -> PreviewViewports {
     let layout = structural_layout(frame.area(), state);
     let active = &state.active;
     let remote_notice_area = layout.remote_status;
@@ -1640,6 +1652,15 @@ pub fn draw(frame: &mut Frame, state: &ViewState) -> PreviewViewports {
         ),
         None => (0, 0),
     };
+    if state.picker.is_none()
+        && state.finder.is_none()
+        && state.annotation_overview.is_none()
+        && state.annotation_editor.is_none()
+        && state.discard_confirm.is_none()
+        && state.help.is_none()
+    {
+        content_overlay(frame);
+    }
     // The worktree picker is a modal overlay: drawn last, on TOP of whatever columns are
     // visible (AC-1, AC-5), so it is never obscured by the layout beneath it.
     if let Some(picker) = &state.picker {

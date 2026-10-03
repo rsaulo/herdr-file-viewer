@@ -34,7 +34,7 @@ build_from_source() {
     echo "herdr-file-viewer needs Rust 1.96+ to build, but cargo was not found. Install Rust from https://rustup.rs then re-run: herdr plugin install $repo" >&2
     exit 1
   fi
-  exec cargo build --release
+  exec cargo build --release --manifest-path "$cargo_toml"
 }
 
 fallback() {
@@ -62,6 +62,13 @@ sha256_of() { # prints the hex digest of file $1
     return 127
   fi
 }
+
+# A fork may deliberately differ from the official release while keeping its version number.
+# Its tracked marker takes priority over the version-only fast path, before any network request.
+if [ -f "$repo_root/.build-from-source" ]; then
+  echo "herdr-file-viewer: .build-from-source present — building this checkout; skipping official prebuilts." >&2
+  build_from_source
+fi
 
 # --- resolve the target triple from the platform ------------------------------------------
 os=$(uname -s 2>/dev/null || echo unknown)

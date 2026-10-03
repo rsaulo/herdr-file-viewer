@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::proc;
+use crate::{proc, render::regular_file_in_root};
 
 const RASTER_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SOURCE_BYTES: u64 = 30 * 1024 * 1024;
@@ -43,18 +43,17 @@ pub fn kind(path: &Path) -> MediaKind {
 }
 
 /// Rasterize a PDF (page 1 via `pdftoppm`) or an image file to PNG bytes.
-/// `None` when the path is the wrong kind, too large, unreadable, or the tool is missing.
-pub fn rasterize_png(path: &Path) -> Option<Vec<u8>> {
-    if !path.is_file() {
-        return None;
-    }
-    let len = fs::metadata(path).ok()?.len();
+/// `None` when the path leaves `root`, is not a regular file, is the wrong kind, too large,
+/// unreadable, or the tool is missing.
+pub fn rasterize_png(root: &Path, path: &Path) -> Option<Vec<u8>> {
+    let canonical = regular_file_in_root(root, path).ok()?;
+    let len = fs::metadata(&canonical).ok()?.len();
     if len == 0 || len > MAX_SOURCE_BYTES {
         return None;
     }
     match kind(path) {
-        MediaKind::Pdf => rasterize_pdf(path),
-        MediaKind::Image => rasterize_image(path),
+        MediaKind::Pdf => rasterize_pdf(&canonical),
+        MediaKind::Image => rasterize_image(&canonical),
         _ => None,
     }
 }
@@ -103,12 +102,14 @@ fn rasterize_pdf(path: &Path) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Build a `file://` URL for terminal-browser. Markdown is converted to a temp HTML file.
-pub fn browser_url(path: &Path) -> Option<String> {
+/// Build a `file://` URL only for a regular file inside `root`.
+/// Markdown is converted to a temp HTML file after the same root guard as raster/text previews.
+pub fn browser_url(root: &Path, path: &Path) -> Option<String> {
+    let canonical = regular_file_in_root(root, path).ok()?;
     match kind(path) {
-        MediaKind::Html => Some(file_url(path)),
+        MediaKind::Html => Some(file_url(&canonical)),
         MediaKind::Markdown => {
-            let md = fs::read_to_string(path).ok()?;
+            let md = fs::read_to_string(&canonical).ok()?;
             let title = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -118,7 +119,7 @@ pub fn browser_url(path: &Path) -> Option<String> {
             fs::write(&out, html).ok()?;
             Some(file_url(&out))
         }
-        MediaKind::Pdf | MediaKind::Image => Some(file_url(path)),
+        MediaKind::Pdf | MediaKind::Image => Some(file_url(&canonical)),
         MediaKind::Other => None,
     }
 }

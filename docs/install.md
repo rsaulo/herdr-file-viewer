@@ -10,7 +10,7 @@ diffs). git 2.39 (Apple's Xcode git) is supported. The optional renderers (`glow
 The system `curl` is optional: without it, document retrieval is unavailable without an error.
 See [external renderers](renderers.md).
 
-> **No Rust toolchain needed when a prebuilt exists.** `herdr plugin install smarzban/herdr-file-viewer`
+> **Official upstream installation: no Rust toolchain needed when a prebuilt exists.** `herdr plugin install smarzban/herdr-file-viewer`
 > downloads a prebuilt, SHA-256-verified binary for your platform (macOS arm64/x86_64, Linux x86_64,
 > Windows x86_64 preview).
 > The prebuilt is matched by **version**, so you get it even when `main` is ahead of the latest tag.
@@ -41,6 +41,26 @@ Confirm it registered with `herdr plugin list`. To build manually outside herdr:
 ```bash
 cargo build --release
 ```
+
+## Building this media-preview fork
+
+This fork contains a tracked `.build-from-source` marker. Both build scripts honor it **before
+any download**, compiling this checkout with `cargo build --release --manifest-path …` instead
+of installing an official prebuilt. This keeps PDF/image previews and `g` even when the fork
+declares the same version as upstream. **Rust 1.96+ is required for this fork.**
+
+Keep the marker when updating or merging upstream. Checkouts without the marker retain the
+upstream version-only, checksum-verified prebuilt path described above.
+
+For a linked checkout, rebuild locally after pulling changes:
+
+```bash
+cargo build --release
+```
+
+Then close and reopen the Files pane; a running viewer continues using its old executable.
+Running `herdr plugin install smarzban/herdr-file-viewer` explicitly installs the official
+plugin instead of this fork, so it is not the update command for a locally linked fork.
 
 ## After installing
 

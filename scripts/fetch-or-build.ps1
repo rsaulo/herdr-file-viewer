@@ -38,7 +38,7 @@ function Build-FromSource {
         [Console]::Error.WriteLine("herdr-file-viewer needs Rust 1.96+ to build, but cargo was not found. Install Rust from https://rustup.rs then re-run: herdr plugin install $Repo")
         exit 1
     }
-    & cargo build --release
+    & cargo build --release --manifest-path $CargoToml
     exit $LASTEXITCODE
 }
 
@@ -91,6 +91,12 @@ function Invoke-FvDownload {
     } catch {
         return $false
     }
+}
+
+# A tracked fork marker wins over version-only matching, before any network request.
+if (Test-Path -LiteralPath (Join-Path $RepoRoot '.build-from-source') -PathType Leaf) {
+    [Console]::Error.WriteLine('herdr-file-viewer: .build-from-source present - building this checkout; skipping official prebuilts.')
+    Build-FromSource
 }
 
 # --- resolve the target triple from the platform --------------------------------------------

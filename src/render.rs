@@ -119,19 +119,15 @@ pub enum Prepared {
     Full { text: String },
 }
 
-/// Classify a file for display: binary vs. truncated-preview vs. full text. Reads at most
-/// `caps.max_bytes` from disk, so a huge or hostile file can never be slurped whole (AC-N1).
-///
-/// Refuses to read anything that does not resolve to a **regular file inside `root`**:
-/// a symlink (or `..`) escaping the root cannot leak out-of-root content into the pane
-/// (AC-N5), and a FIFO/device/dir is never opened (no hang, no garbage). Such paths return an
-/// [`Prepared::Unavailable`] placeholder explaining why no preview is available.
-pub fn classify(root: &Path, path: &Path, caps: Caps) -> Prepared {
-    let Ok(canon_root) = root.canonicalize() else {
-        return Prepared::Unavailable {
-            reason: UnavailableReason::Missing,
-        };
-    };
+/// Resolve a regular file inside the viewed root before any renderer or browser reads it.
+/// Shared by text and media previews so neither can bypass the out-of-root symlink guard (AC-N5).
+pub(crate) fn regular_file_in_root(
+    root: &Path,
+    path: &Path,
+) -> Result<std::path::PathBuf, UnavailableReason> {
+    let canon_root = root
+        .canonicalize()
+        .map_err(|_| UnavailableReason::Missing)?;
     let canonical = match path.canonicalize() {
         Ok(path) => path,
         Err(error) => {
@@ -150,28 +146,31 @@ pub fn classify(root: &Path, path: &Path, caps: Caps) -> Prepared {
                     _ => UnavailableReason::Missing,
                 }
             };
-            return Prepared::Unavailable { reason };
+            return Err(reason);
         }
     };
     if !canonical.starts_with(&canon_root) {
-        return Prepared::Unavailable {
-            reason: UnavailableReason::OutsideViewedRoot,
-        }; // escapes the root (AC-N5)
+        return Err(UnavailableReason::OutsideViewedRoot);
     }
     match std::fs::metadata(&canonical) {
-        Ok(m) if m.is_file() => {}
-        Ok(_) => {
-            return Prepared::Unavailable {
-                reason: UnavailableReason::NotRegular,
-            };
-        } // dir / FIFO / device
-        Err(_) => {
-            return Prepared::Unavailable {
-                reason: UnavailableReason::Unreadable,
-            };
-        } // vanished or became inaccessible after canonicalization
+        Ok(m) if m.is_file() => Ok(canonical),
+        Ok(_) => Err(UnavailableReason::NotRegular),
+        Err(_) => Err(UnavailableReason::Unreadable),
     }
+}
 
+/// Classify a file for display: binary vs. truncated-preview vs. full text. Reads at most
+/// `caps.max_bytes` from disk, so a huge or hostile file can never be slurped whole (AC-N1).
+///
+/// Refuses to read anything that does not resolve to a **regular file inside `root`**:
+/// a symlink (or `..`) escaping the root cannot leak out-of-root content into the pane
+/// (AC-N5), and a FIFO/device/dir is never opened (no hang, no garbage). Such paths return an
+/// [`Prepared::Unavailable`] placeholder explaining why no preview is available.
+pub fn classify(root: &Path, path: &Path, caps: Caps) -> Prepared {
+    let canonical = match regular_file_in_root(root, path) {
+        Ok(path) => path,
+        Err(reason) => return Prepared::Unavailable { reason },
+    };
     let byte_len = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
     let Ok(file) = File::open(&canonical) else {
         return Prepared::Unavailable {

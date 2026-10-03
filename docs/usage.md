@@ -376,8 +376,17 @@ The viewer is read-only; to *act* on a file it hands off to another tool:
 - **Reveal in file manager** (`R`): open Finder / Explorer / a Linux file manager with the entry
   highlighted where supported, so you can drag it out (e.g. into Slack).
 
-All three are read-only hand-offs; the viewer never modifies a file itself. The `open` / `reveal`
-commands are [configurable](configuration.md).
+These hand-offs never modify the selected file. Markdown rich previews write generated HTML
+outside the viewed tree. The `open` / `reveal` commands are [configurable](configuration.md).
+
+PDF/image rasters and `g` only accept regular files that resolve **inside the viewed root**.
+Symlinks within the root work; broken symlinks, non-regular paths, and symlinks escaping the root
+are refused, just like text previews. In-pane images are temporarily hidden while help, a picker,
+an annotation dialog, or discard confirmation is open, and restored when the modal closes.
+
+On herdr 0.9.3, images use standard Kitty graphics through the pane's terminal output, not the
+removed `pane.graphics.*` socket API. Confirm both client and running server versions with
+`herdr --version` and `herdr status server` when checking graphics support.
 
 ## Switching worktree
 

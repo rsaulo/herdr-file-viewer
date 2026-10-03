@@ -253,15 +253,15 @@ fn event_loop(terminal: &mut DefaultTerminal, controller: &mut Controller) -> io
                 controller.set_width(frame.area().width);
                 let view: ViewState = controller.view_state();
                 let geom = presenter::geometry(frame.area(), &view);
-                let viewports = presenter::draw(frame, &view);
+                let viewports = presenter::draw_with_content_overlay(frame, &view, |frame| {
+                    controller.draw_raster(frame, geom.content_inner);
+                });
                 // Feed the drawn content viewport back so content scrolling can be clamped to
                 // it on the next intent, and the hit-test geometry so a mouse event maps to the
                 // live layout. `true` means a deferred launch-open zoom just armed (narrow
                 // tree-only pane) and we must paint again so the file is actually visible.
                 need_redraw = controller.set_preview_viewports(viewports);
-                let raster_area = geom.content_inner;
                 controller.set_pane_geometry(geom);
-                controller.draw_raster(frame, raster_area);
             })?;
             dirty = need_redraw;
         }

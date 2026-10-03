@@ -45,6 +45,11 @@ collaborator handed you. Its security posture is built around that.
   flag-like id can't option-inject the herdr CLI). Paths are passed to `git` as raw `OsStr`
   arguments after a within-root check (no traversal above the root, no arbitrary reads).
 
+- **Media path boundary.** Raster and browser previews reuse the text renderer's canonical,
+  in-root regular-file guard before reading a file or handing its canonical path to a tool.
+  Out-of-root symlinks, traversal, broken links, directories, and devices are refused. Generated
+  Markdown HTML and PDF raster output are temporary files outside the viewed tree.
+
 - **Resource bounds.** File reads and captured renderer/diff output are size-capped, and external
   renderers run under a wall-clock timeout, so a huge or slow input degrades gracefully rather
   than hanging or exhausting memory.
