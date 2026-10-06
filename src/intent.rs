@@ -264,6 +264,7 @@ mod tests {
                 | Intent::ToggleZoom
                 | Intent::PinPreview
                 | Intent::Refresh
+                // Writes only the plugin-owned `spotlight-dismissal.json`, never viewed files or git.
                 | Intent::DismissUpdate
                 | Intent::SwitchWorktree
                 | Intent::OpenFinder

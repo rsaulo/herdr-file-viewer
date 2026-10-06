@@ -414,7 +414,7 @@ project does not dismiss its spotlight: the viewer does not inspect installed ap
 
 The safe-to-delete `spotlight-dismissal.json` file lives beside `update-check.json` in the plugin's
 cache directory (`$XDG_CACHE_HOME/herdr-file-viewer`, default `~/.cache/herdr-file-viewer` on Unix;
-`%LOCALAPPDATA%\\herdr-file-viewer` on Windows). It remembers only the last explicitly dismissed
+`%LOCALAPPDATA%\herdr-file-viewer` on Windows). It remembers only the last explicitly dismissed
 spotlight; deleting it allows that spotlight to appear again. If saving fails, `u` still hides the
 row for the current session.
 
