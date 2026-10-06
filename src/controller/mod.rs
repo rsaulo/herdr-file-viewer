@@ -3286,8 +3286,16 @@ impl Controller {
         }
 
         self.update_dismissed = true;
-        if let Some(dismissed) =
-            update::dismissal::DismissedSpotlight::from_spotlight(&self.notice_snapshot.spotlight)
+        // Persist only a spotlight the row actually showed: re-saving one already filtered out
+        // would overwrite a newer dismissal another viewer recorded in the shared file.
+        let already_hidden = self
+            .dismissed_spotlight
+            .as_ref()
+            .is_some_and(|dismissed| dismissed.matches(&self.notice_snapshot.spotlight));
+        if !already_hidden
+            && let Some(dismissed) = update::dismissal::DismissedSpotlight::from_spotlight(
+                &self.notice_snapshot.spotlight,
+            )
         {
             if let Some(store) = &self.spotlight_dismissal_store {
                 store.save(&dismissed);

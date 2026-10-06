@@ -13,7 +13,9 @@ use herdr_file_viewer::controller::{
 use herdr_file_viewer::git::{Baseline, Status};
 use herdr_file_viewer::intent::Intent;
 use herdr_file_viewer::update::cache::{self, Cache};
-use herdr_file_viewer::update::dismissal::{FileSpotlightDismissalStore, SpotlightDismissalStore};
+use herdr_file_viewer::update::dismissal::{
+    DismissedSpotlight, FileSpotlightDismissalStore, SpotlightDismissalStore,
+};
 use herdr_file_viewer::update::spotlight_policy::{
     SpotlightCache, SpotlightInput, cache_delta, project,
 };
@@ -621,6 +623,38 @@ fn persisted_dismissal_filters_identical_background_refreshes_but_not_changed_sp
     assert!(
         restored.view_state().remote_notice_status.is_some(),
         "deleting the advisory record resets dismissal"
+    );
+}
+
+#[test]
+fn dismissing_a_release_only_row_never_resaves_an_already_hidden_spotlight() {
+    let root = TempDir::new();
+    let dir = TempDir::new();
+    let store = FileSpotlightDismissalStore::new(dir.path().to_path_buf());
+    let old = DismissedSpotlight::from_spotlight(&snapshot(None, Some("Old")).spotlight).unwrap();
+    let newer =
+        DismissedSpotlight::from_spotlight(&snapshot(None, Some("Newer")).spotlight).unwrap();
+    store.save(&old);
+
+    // Viewer A starts with `Old` dismissed, so its row shows only the release.
+    let mut a = persistent_controller(root.path(), dir.path());
+    a.set_update(UpdateState {
+        initial: snapshot(Some(v(9, 9, 9)), Some("Old")),
+        rx: None,
+    });
+    assert_eq!(
+        a.view_state().remote_notice_status.as_deref(),
+        Some("Update v9.9.9 available · ? details · u dismiss"),
+        "precondition: the dismissed spotlight is filtered"
+    );
+    // Another viewer sharing the cache dir records a newer dismissal meanwhile.
+    store.save(&newer);
+
+    assert!(a.handle(Intent::DismissUpdate).redraw);
+    assert_eq!(
+        store.load(),
+        Some(newer),
+        "A must not overwrite the shared record with the spotlight it never showed"
     );
 }
 
