@@ -259,6 +259,9 @@ Git status is woven straight into the tree, not a separate mode:
   (gitignored) is skipped rather than revealed, so the jump never switches a filter off behind your
   back. This is `n`/`N` for the tree: reviewing a branch is a walk over the changed files, and in a
   deeply nested repo that walk is otherwise a long run of `j` presses past directory rows.
+- **Open folders to new changes**: set [`expand_changed = true`](configuration.md) and the tree
+  opens the folders of every file with uncommitted changes at launch, and of each newly changed file
+  as refreshes land. A folder you collapse stays closed until a different file inside it changes.
 - **Git-status mode**: press `d` to filter the tree to **current working-tree status only**
   (modified, staged, untracked, deleted — independent of baseline) and force working-tree diffs in
   the content pane. On a directory, that means a unified diff of all tracked changes under it.
@@ -377,7 +380,8 @@ The viewer is read-only; to *act* on a file it hands off to another tool:
   [config.toml](configuration.md) (or, with none set, your `$EDITOR`). The viewer suspends, runs the
   editor, and resumes when it exits. See [opening in an editor](keys.md#opening-in-an-editor).
 - **Open with default app** (`O`): hand the file or directory to the OS default application (an
-  image opens in the system viewer, and so on). Non-blocking — the viewer keeps running.
+  image opens in the system viewer, and so on). Non-blocking — the viewer keeps running. A binary
+  file the viewer can't show (an image, a PDF, an archive) displays a placeholder that points here.
 - **Reveal in file manager** (`R`): open Finder / Explorer / a Linux file manager with the entry
   highlighted where supported, so you can drag it out (e.g. into Slack).
 

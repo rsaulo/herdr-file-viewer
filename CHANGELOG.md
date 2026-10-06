@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 - Open the viewer at another directory: the `open-file-viewer-at` (split) and `open-file-viewer-at-tab` (tab) actions pop up a small prompt pre-filled with `~/` (the tab one names its tab `Files`). `Tab` completes directory and file names (ignoring case) and `↑`/`↓` pick from the matches, `Enter` opens the viewer there (a file opens in its directory, already shown), `Esc` cancels. Paths start from `~`, falling back to `/` when not found there, so system paths need no leading slash. Agents can do the same with `--env HERDR_FILE_VIEWER_ROOT=<dir>`. → [summoning](docs/summoning.md#open-at-another-directory)
+- `expand_changed`: open the tree's folders to files with uncommitted changes, at launch and whenever a refresh finds a newly changed file. A folder you collapse stays closed until a different file inside it changes. Off by default. Thanks @sftinc (#188) → [configuration](docs/configuration.md) · [usage](docs/usage.md#git-awareness)
 
 ### Fixed
 - The selected file stays selected when a file appears or disappears above it. A focus refresh or `r` used to move the highlight to a different file. Thanks @sftinc (#181)
@@ -19,6 +20,7 @@ All notable changes to this project are documented here. The format is based on
 - Dismissing a project Spotlight with `u` now remembers it across launches instead of showing the same promotion every time. Changed spotlight titles/bodies can appear again; release notices remain session-only and What's New keeps all details. → [usage](docs/usage.md#staying-up-to-date)
 
 ### Changed
+- The binary-file placeholder now reads `[binary file: press O to open in the default app]`, pointing at the existing `O` hand-off instead of a dead end. Thanks @sftinc (#190) → [usage](docs/usage.md#handing-a-file-off)
 - The tab action (`prefix+shift+f`) now switches only to a viewer showing the repo you are in, so a viewer opened on another directory no longer captures it. To support this, a running viewer keeps its working directory on the root it shows (renderers, the editor and other tools it starts still run from the plugin directory). → [summoning](docs/summoning.md#open-in-a-tab-instead-of-a-split)
 - Requires herdr 0.7.5 or newer (popup support). → [install](docs/install.md)
 
