@@ -33,6 +33,7 @@ pub mod proc;
 pub mod prompt;
 pub mod render;
 pub mod root;
+pub mod root_picker;
 pub mod search;
 pub mod text_layout;
 pub mod tree;

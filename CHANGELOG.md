@@ -10,14 +10,22 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 - In-pane PDF/image preview: the first PDF page (`pdftoppm`) and common image formats rasterize to PNG and draw via Kitty graphics when the terminal supports it. → [usage](docs/usage.md#handing-a-file-off) · [keys](docs/keys.md)
 - `g` (`open_rich_preview`) opens HTML or Markdown (converted to HTML) in `terminal-browser` in a right split. → [keys](docs/keys.md) · [configuration](docs/configuration.md)
+- Open the viewer at another directory: the `open-file-viewer-at` (split) and `open-file-viewer-at-tab` (tab) actions pop up a small prompt pre-filled with `~/` (the tab one names its tab `Files`). `Tab` completes directory and file names (ignoring case) and `↑`/`↓` pick from the matches, `Enter` opens the viewer there (a file opens in its directory, already shown), `Esc` cancels. Paths start from `~`, falling back to `/` when not found there, so system paths need no leading slash. Agents can do the same with `--env HERDR_FILE_VIEWER_ROOT=<dir>`. → [summoning](docs/summoning.md#open-at-another-directory)
 
 ### Fixed
+- The selected file stays selected when a file appears or disappears above it. A focus refresh or `r` used to move the highlight to a different file. Thanks @sftinc (#181)
+- Recover the initial pane layout without a keypress when a split resize notification is missed during startup. Root headers and the `? help` footer no longer remain clipped or wrapped until focus/navigation; unchanged idle frames still do not redraw. Thanks @rsaulo (#185) → [usage](docs/usage.md#the-tree)
 - Show committed branch changes (`M`/`A` and dirty-directory dots/colors) in the full tree from startup, without needing to toggle `c`. Baseline switches and refreshes also update the markers when the filter is off; `d` stays working-tree-only. → [usage](docs/usage.md#git-awareness)
-- Recover the initial pane layout without a keypress when a split resize notification is missed during startup. Root headers and the `? help` footer no longer remain clipped or wrapped until focus/navigation; unchanged idle frames still do not redraw. → [usage](docs/usage.md#the-tree)
+- Mouse selection now follows terminal cell width across full-width CJK text, including wrapped and horizontally-scrolled content. Thanks @nonhana (#143) → [usage](docs/usage.md#using-the-mouse)
+- Markdown code-block comments and generic subheadings now meet the WCAG 4.5:1 contrast minimum against the fixed code background. → [renderers](docs/renderers.md#bundled-markdown-palette)
 - Dismissing a project Spotlight with `u` now remembers it across launches instead of showing the same promotion every time. Changed spotlight titles/bodies can appear again; release notices remain session-only and What's New keeps all details. → [usage](docs/usage.md#staying-up-to-date)
 - Media rasters and browser previews now share the text renderer's in-root regular-file guard, blocking out-of-root symlinks and traversal. → [usage](docs/usage.md#handing-a-file-off)
 - Images no longer obscure help, pickers, annotation dialogs, or discard confirmation; closing a modal restores the retained raster.
 - This fork's `.build-from-source` marker makes both build scripts skip official prebuilts, preserving media features even at the same version as upstream. → [install](docs/install.md#building-this-media-preview-fork)
+
+### Changed
+- The tab action (`prefix+shift+f`) now switches only to a viewer showing the repo you are in, so a viewer opened on another directory no longer captures it. To support this, a running viewer keeps its working directory on the root it shows (renderers, the editor and other tools it starts still run from the plugin directory). → [summoning](docs/summoning.md#open-in-a-tab-instead-of-a-split)
+- Requires herdr 0.7.5 or newer (popup support). → [install](docs/install.md)
 
 ## [1.17.0] - 2026-09-16
 
